@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,7 +12,9 @@ import (
 	"time"
 )
 
-// Runner launches the browsers and keeps each one routed to its output.
+// Runner switches each running browser to its audio output and sets its
+// volume. It never starts or restarts browsers - they are opened by people;
+// a browser opened later is switched on the next pass.
 type Runner struct {
 	cfg  *Config
 	logf func(format string, args ...any)
@@ -22,7 +23,6 @@ type Runner struct {
 	routed  map[uint32]string    // pid -> device ID already applied
 	volSet  map[string]time.Time // browser path -> when its volume was last applied
 	stopped chan struct{}
-	restart bool // relaunch closed browsers
 }
 
 // Volume is re-applied this often, so audio sessions that start later
@@ -123,37 +123,10 @@ func (r *Runner) WaitForDevices(timeout time.Duration) {
 	}
 }
 
-func (r *Runner) Launch(o Output) error {
-	args := splitArgs(o.Args)
-	if o.URL != "" {
-		args = append(args, o.URL)
-	}
-	cmd := exec.Command(o.Browser, args...)
-	cmd.Dir = filepath.Dir(o.Browser)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	r.logf("%s: started %s (pid %d)", o.Name, filepath.Base(o.Browser), cmd.Process.Pid)
-	go cmd.Wait() // reap; browsers often hand off to another process and exit
-	return nil
-}
-
-func (r *Runner) LaunchAll() {
-	for _, o := range r.enabled() {
-		if len(pidsForExe(o.Browser)) > 0 {
-			r.logf("%s: %s is already running", o.Name, filepath.Base(o.Browser))
-			continue
-		}
-		if err := r.Launch(o); err != nil {
-			r.logf("%s: failed to start browser: %v", o.Name, err)
-		}
-	}
-}
-
 // Enforce routes every new process of each browser to its device. Browsers
 // spawn helper processes later (Chrome's audio service starts when sound
 // first plays), so this runs periodically rather than once.
-func (r *Runner) Enforce(restart bool) {
+func (r *Runner) Enforce() {
 	for {
 		// Devices are handled in parallel: each svcl call is a separate
 		// process, so several outputs are routed at the same time.
@@ -163,7 +136,7 @@ func (r *Runner) Enforce(restart bool) {
 			go func(o Output) {
 				defer wg.Done()
 				defer recoverGoroutine("routing " + o.Name)
-				r.enforceOne(o, restart)
+				r.enforceOne(o)
 			}(o)
 		}
 		wg.Wait()
@@ -175,16 +148,10 @@ func (r *Runner) Enforce(restart bool) {
 	}
 }
 
-func (r *Runner) enforceOne(o Output, restart bool) {
+func (r *Runner) enforceOne(o Output) {
 	pids := pidsForExe(o.Browser)
 	if len(pids) == 0 {
-		if restart {
-			r.logf("%s: browser is not running, restarting", o.Name)
-			if err := r.Launch(o); err != nil {
-				r.logf("%s: restart failed: %v", o.Name, err)
-			}
-		}
-		return
+		return // not open yet; switched as soon as it is
 	}
 	// No device: reset to the Windows default, since Windows remembers
 	// earlier per-app routing for this .exe.

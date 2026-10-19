@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"unsafe"
 
 	"rila-spa-audio/internal/applog"
 
@@ -55,6 +56,7 @@ func main() {
 	}
 
 	startSession(mode, cfg)
+	registerCrashRestart()
 	runGUI(cfg, *run)
 }
 
@@ -76,4 +78,16 @@ func fatal(msg string) {
 	windows.MessageBox(0, text, title, windows.MB_ICONERROR)
 	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
+}
+
+// registerCrashRestart asks Windows to start the program again (hidden in
+// the tray, --run) if it crashes or hangs after running for at least 60 s.
+// A normal "Quit the program" is not restarted.
+func registerCrashRestart() {
+	const restartNoReboot = 0x8 // after a reboot the autostart entry handles it
+	args, _ := windows.UTF16PtrFromString("--run")
+	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("RegisterApplicationRestart")
+	if hr, _, _ := proc.Call(uintptr(unsafe.Pointer(args)), restartNoReboot); hr != 0 {
+		log.Printf("Automatic restart after a crash is not available (code %#x)", hr)
+	}
 }

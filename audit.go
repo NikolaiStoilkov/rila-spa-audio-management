@@ -363,8 +363,6 @@ func diffConfig(old, cur *Config) []string {
 		field(dev, "audio output", a.DeviceID, b.DeviceID)
 		field(dev, "browser", a.Browser, b.Browser)
 		field(dev, "volume", strconv.Itoa(a.VolumePercent())+"%", strconv.Itoa(b.VolumePercent())+"%")
-		field(dev, "URL", a.URL, b.URL)
-		field(dev, "extra args", a.Args, b.Args)
 		field(dev, "description", a.Description, b.Description)
 	}
 	return out

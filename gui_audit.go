@@ -86,7 +86,7 @@ func (a *app) fieldChanged(s *slotUI, field, value string, kv ...string) {
 var savedNow = map[string]string{
 	"Audio output": "yes (saved immediately)",
 	"Enabled":      "no", "Device name": "no", "Browser": "no", "Volume": "no",
-	"URL": "no", "Extra args": "no", "Description": "no",
+	"Description": "no",
 }
 
 // snapshot records the starting values of a tab so later edits log old -> new.
@@ -98,8 +98,6 @@ func (a *app) snapshot(s *slotUI) {
 	a.fieldChanged(s, "Audio output", s.deviceID.Text())
 	a.fieldChanged(s, "Browser", a.selectedBrowser(s))
 	a.fieldChanged(s, "Volume", fmt.Sprintf("%d%%", s.volume.Value()))
-	a.fieldChanged(s, "URL", s.url.Text())
-	a.fieldChanged(s, "Extra args", s.args.Text())
 	a.fieldChanged(s, "Description", s.desc.Text())
 	a.busy = busy
 }
@@ -110,8 +108,6 @@ func (a *app) trackSlot(s *slotUI) {
 		w.EditingFinished().Attach(func() { a.fieldChanged(s, field, w.Text()) })
 	}
 	text("Device name", s.name)
-	text("URL", s.url)
-	text("Extra args", s.args)
 	s.desc.FocusedChanged().Attach(func() {
 		if !s.desc.Focused() {
 			a.fieldChanged(s, "Description", s.desc.Text())
@@ -141,8 +137,6 @@ func (a *app) trackSlot(s *slotUI) {
 	a.nameControl(s.browser, dev("Browser dropdown"))
 	a.nameControl(s.volume, dev("Volume slider"))
 	a.nameControl(s.volBox, dev("Volume box"))
-	a.nameControl(s.url, dev("URL field"))
-	a.nameControl(s.args, dev("Extra args field"))
 	a.nameControl(s.desc, dev("Description field"))
 	a.nameControl(s.page, func() string { return "tab " + a.deviceLabel(s) })
 }
@@ -173,7 +167,7 @@ var friendlyClass = map[string]string{
 }
 
 // describeControl names the control under the cursor for the mouse log.
-// Text typed into fields is never read (passwords, URLs).
+// Text typed into fields is never read (passwords).
 func (a *app) describeControl(h win.HWND) string {
 	if f, ok := a.names[h]; ok {
 		return f()

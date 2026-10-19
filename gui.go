@@ -26,8 +26,6 @@ type slotUI struct {
 	detected *walk.ComboBox
 	status   *walk.Label
 	browser  *walk.ComboBox
-	url      *walk.LineEdit
-	args     *walk.LineEdit
 	desc     *walk.TextEdit
 	volume   *walk.Slider
 	volBox   *walk.NumberEdit // exact value, 1% steps
@@ -70,7 +68,8 @@ const appTitle = "Rila Spa Audio - outputs and browsers"
 
 // runGUI shows the settings window with a system tray icon. Closing the window
 // only hides it; the program exits from the tray menu. With background=true
-// (Windows startup) it starts hidden in the tray and launches the browsers.
+// (Windows startup) it starts hidden in the tray. Either way it keeps
+// switching the open browsers to their audio outputs; it never starts them.
 func runGUI(cfg *Config, background bool) {
 	a := &app{cfg: cfg}
 	a.devices, _ = ListRenderDevices()
@@ -104,7 +103,7 @@ func runGUI(cfg *Config, background bool) {
 					CheckBox{AssignTo: &a.autostart, Text: "Start automatically when Windows starts", OnClicked: a.on("Start automatically when Windows starts", nil, a.toggleAutostart)},
 					HSpacer{},
 					PushButton{Text: "Save", OnClicked: a.on("Save", nil, func() { a.save(true) })},
-					PushButton{Text: "Save && Launch all", OnClicked: a.on("Save & Launch all", nil, a.launchAll)},
+					PushButton{Text: "Save && Apply", OnClicked: a.on("Save & Apply", nil, a.applyAll)},
 				},
 			},
 		},
@@ -161,10 +160,10 @@ func runGUI(cfg *Config, background bool) {
 				a.logf("WARNING: %s", p)
 			}
 			r.WaitForDevices(time.Duration(cfg.DeviceWaitSec) * time.Second)
-			r.LaunchAll()
-			a.mw.Synchronize(func() { a.startRunner(cfg.RestartIfClosed) })
+			a.mw.Synchronize(func() { a.startRunner() })
 		})
 	} else {
+		a.startRunner()
 		a.mw.Synchronize(func() { a.showWindowFrom("program start") })
 	}
 	a.mw.Run()
@@ -188,10 +187,7 @@ func (a *app) setupTray() error {
 		ni.ContextMenu().Actions().Add(act)
 	}
 	addAction("Open", func() { a.showWindowFrom("tray menu") })
-	addAction("Launch all browsers", func() {
-		r := a.startRunner(a.cfg.RestartIfClosed)
-		safeGo("launch all", r.LaunchAll)
-	})
+	addAction("Apply audio routing now", func() { a.startRunner() })
 	addAction("Open log viewer", a.openLogViewer)
 	ni.ContextMenu().Actions().Add(walk.NewSeparatorAction())
 	addAction("Quit the program", a.quit)
@@ -244,7 +240,7 @@ func (a *app) hideToTray() {
 }
 
 func (a *app) quit() {
-	if !a.ask("Quit", "Quit Rila Spa Audio?\n\nBrowsers keep playing, but closed browsers will no longer be restarted.", walk.MsgBoxIconQuestion) {
+	if !a.ask("Quit", "Quit Rila Spa Audio?\n\nOpen browsers keep playing on their current outputs, but browsers opened after this are no longer switched.", walk.MsgBoxIconQuestion) {
 		return
 	}
 	var kv []string
@@ -472,12 +468,6 @@ func (a *app) addSlot(o Output) *slotUI {
 				},
 			},
 
-			Label{Text: "URL:"},
-			LineEdit{AssignTo: &s.url, ColumnSpan: 2},
-
-			Label{Text: "Extra args:"},
-			LineEdit{AssignTo: &s.args, ColumnSpan: 2},
-
 			Label{Text: "Description:", Alignment: AlignHNearVNear},
 			TextEdit{AssignTo: &s.desc, ColumnSpan: 2, VScroll: true, MinSize: Size{Height: 70}, MaxSize: Size{Height: 140}},
 
@@ -486,7 +476,7 @@ func (a *app) addSlot(o Output) *slotUI {
 				Layout:     HBox{MarginsZero: true},
 				ColumnSpan: 2,
 				Children: []Widget{
-					PushButton{Text: "Test this output", OnClicked: a.on("Test this output", s, func() { a.testOne(s) })},
+					PushButton{Text: "Apply to this browser", OnClicked: a.on("Apply to this browser", s, func() { a.applyOne(s) })},
 					HSpacer{},
 					PushButton{Text: "Remove this output", OnClicked: a.on("Remove this output", s, func() { a.removeSlot(s) })},
 				},
@@ -503,8 +493,6 @@ func (a *app) addSlot(o Output) *slotUI {
 	s.name.SetText(o.Name)
 	s.deviceID.SetText(o.DeviceID)
 	s.browser.SetModel(a.browserLabels())
-	s.url.SetText(o.URL)
-	s.args.SetText(o.Args)
 	s.volume.SetValue(o.VolumePercent())
 	s.volBox.SetValue(float64(o.VolumePercent()))
 	s.desc.SetText(strings.ReplaceAll(o.Description, "\n", "\r\n"))
@@ -554,8 +542,6 @@ func (a *app) readFromUI() {
 			Name:        strings.TrimSpace(s.name.Text()),
 			DeviceID:    NormalizeID(s.deviceID.Text()),
 			Browser:     a.selectedBrowser(s),
-			URL:         strings.TrimSpace(s.url.Text()),
-			Args:        strings.TrimSpace(s.args.Text()),
 			Volume:      intPtr(s.volume.Value()),
 			Description: strings.TrimSpace(strings.ReplaceAll(s.desc.Text(), "\r\n", "\n")),
 		})
@@ -642,9 +628,7 @@ func (a *app) save(showProblems bool) bool {
 	}
 	a.logf("Saved %s", configPath())
 	a.logSave()
-	if a.runner != nil {
-		a.startRunner(a.runner.restart)
-	}
+	a.startRunner() // switch with the saved settings
 	if a.autostart.Checked() {
 		SetAutostart(true) // refresh path in case the .exe was moved
 	}
@@ -659,48 +643,63 @@ func (a *app) save(showProblems bool) bool {
 }
 
 // startRunner (re)starts background routing with a snapshot of the config.
-func (a *app) startRunner(restart bool) *Runner {
+// Its first pass runs immediately.
+func (a *app) startRunner() *Runner {
 	if a.runner != nil {
 		a.runner.Stop()
 	}
-	a.runner = NewRunner(a.cfg.Clone(), a.logf)
-	a.runner.restart = restart
-	r := a.runner
-	safeGo("routing loop", func() { r.Enforce(restart) })
-	return a.runner
+	r := NewRunner(a.cfg.Clone(), a.logf)
+	a.runner = r
+	safeGo("routing loop", r.Enforce)
+	return r
 }
 
-func (a *app) launchAll() {
+// applyAll saves and switches every open browser to its audio output now.
+func (a *app) applyAll() {
 	if !a.save(false) {
 		return
 	}
+	var lines []string
+	for i, o := range a.cfg.Outputs {
+		if o.Enabled && o.Browser != "" {
+			lines = append(lines, a.applyLine(i, o))
+		}
+	}
+	msg := strings.Join(lines, "\n")
 	if problems := NewRunner(a.cfg, a.logf).Check(); len(problems) > 0 {
-		msg := strings.Join(problems, "\n\n") + "\n\nLaunch anyway?"
-		if !a.ask("Check configuration", msg, walk.MsgBoxIconWarning) {
-			return
-		}
+		msg += "\n\nPlease check:\n- " + strings.Join(problems, "\n- ")
 	}
-	r := a.startRunner(a.cfg.RestartIfClosed)
-	safeGo("launch all", r.LaunchAll)
+	audit("info", applog.EventRunner, "Audio routing applied", "summary", strings.ReplaceAll(msg, "\n", " | "))
+	walk.MsgBox(a.mw, "Audio routing applied", msg, walk.MsgBoxIconInformation)
 }
 
-func (a *app) testOne(s *slotUI) {
+// applyOne saves and switches one tab's browser now.
+func (a *app) applyOne(s *slotUI) {
 	if !a.save(false) {
 		return
 	}
-	o := a.cfg.Outputs[a.slotIndex(s)]
+	i := a.slotIndex(s)
+	o := a.cfg.Outputs[i]
 	if o.Browser == "" {
-		a.logf("%s: no browser set", o.Name)
+		walk.MsgBox(a.mw, "Apply", "Choose a browser first.", walk.MsgBoxIconInformation)
 		return
 	}
-	r := a.startRunner(a.runner != nil && a.runner.restart)
-	safeGo("test output", func() {
-		if len(pidsForExe(o.Browser)) == 0 {
-			if err := r.Launch(o); err != nil {
-				a.logf("%s: %v", o.Name, err)
-			}
-		}
-	})
+	msg := a.applyLine(i, o)
+	audit("info", applog.EventRunner, "Audio routing applied to one browser", "device", tabTitle(i, o.Name), "summary", msg)
+	walk.MsgBox(a.mw, "Audio routing applied", msg, walk.MsgBoxIconInformation)
+}
+
+// applyLine describes what happens to one device's browser.
+func (a *app) applyLine(i int, o Output) string {
+	output := "Windows default output"
+	if d, ok := FindDevice(a.devices, o.DeviceID); ok {
+		output = d.Label()
+	}
+	name := tabTitle(i, o.Name)
+	if len(pidsForExe(o.Browser)) == 0 {
+		return fmt.Sprintf("%s: %s is not open - it will be switched to %s as soon as it is opened.", name, browserName(o.Browser), output)
+	}
+	return fmt.Sprintf("%s: %s -> %s", name, browserName(o.Browser), output)
 }
 
 func (a *app) toggleAutostart() {

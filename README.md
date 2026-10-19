@@ -1,13 +1,13 @@
 # rila-spa-audio-management
 
-A Windows tool that plays a different browser on each audio output.
+A Windows tool that switches the sound of each (already open) browser to its own audio output.
 
 📖 User guide in Bulgarian: [docs/user-guide-bg.md](docs/user-guide-bg.md) (copied into `dist/` by the build).
 It has two programs:
 
 | Program | Purpose |
 |---|---|
-| `spa-audio.exe` | Settings window plus a system tray icon. It starts the browsers and keeps each one routed to its audio output. |
+| `spa-audio.exe` | Settings window plus a system tray icon. It keeps each open browser routed to its audio output (it never starts browsers). |
 | `log-viewer.exe` | Shows `spa-audio-log.xml`. It requires a login (default **admin / admin123**). |
 
 ## How it works
@@ -38,8 +38,8 @@ It has two programs:
      The tab shows a **green speaker** while that device is playing, and a gray one when the browser is open but silent.
    - **Volume** sets that browser's volume (the same as its slider in the Windows volume mixer). Changes apply right away.
      The program reapplies it every 30 s and at startup, so it holds even when the page starts playing later.
-   - Enter the URL and any extra args. **Description** is free text for notes about the device (location, speaker model, ...).
-   - Click **Test this output** on each tab to check it, then **Save & Launch all**.
+   - **Description** is free text for notes about the device (location, speaker model, ...).
+   - Click **Apply to this browser** on each tab to check it, then **Save & Apply**.
 4. Tick **Start automatically when Windows starts**.
    This adds `"C:\SpaAudio\spa-audio.exe" --run` to `HKCU\...\CurrentVersion\Run`. No admin rights are needed.
 5. Enable auto-login for the PC (`netplwiz`), so it starts after a power cut without anyone touching it.
@@ -61,10 +61,13 @@ It has two programs:
 ## Running in the background
 
 - Closing the window (X) **hides it to the system tray**. The program keeps running.
-- Tray icon: left-click opens the window. The right-click menu has **Open**, **Launch all browsers**, **Open log viewer**,
+- Tray icon: left-click opens the window. The right-click menu has **Open**, **Apply audio routing now**, **Open log viewer**,
   and **Quit the program** (the only way to exit).
 - At Windows startup (`--run`), the program starts hidden in the tray. It waits up to `deviceWaitSec` (120 s) for the devices,
-  starts the browsers, keeps them routed, and restarts any browser that gets closed.
+  then switches the open browsers to their outputs.
+- **The program never starts, closes or restarts browsers.** People open them as usual. While the program runs (window or tray), it switches every open browser, and any browser opened later, to its output within about 5 s.
+- **Save & Apply** saves, applies the routing immediately, and shows a summary of which browser went to which output.
+- If the program crashes or hangs, Windows restarts it in the tray (`RegisterApplicationRestart`, after at least 60 s of running).
 - Only one copy runs at a time. Starting the exe again brings the running window to the front.
 
 ## Logs
@@ -74,7 +77,7 @@ The code is in [internal/applog](internal/applog) (shared by both programs) and 
 
 ```xml
 <entry time="2026-10-19T13:40:01.123+03:00" level="info" event="action" mode="gui" session="3f9a1c2e" user="SPA-PC\reception">
-  <msg>Clicked "Test this output" on 2. Pool</msg>
+  <msg>Clicked "Apply to this browser" on 2. Pool</msg>
   <data name="count_session">3</data>
   <data name="count_total">41</data>
   <data name="cursor_screen">812,644</data>
@@ -91,7 +94,7 @@ The code is in [internal/applog](internal/applog) (shared by both programs) and 
 | `mouse` | Every mouse click inside the program (thread-local hook): button, control under the cursor (including the title bar and the X button), screen and window coordinates. |
 | `window` / `tab` | Window opened, hidden to tray, minimized/maximized/restored, focus gained/lost, device list opened/closed, tab switches. |
 | `system` | Windows shutdown/restart/logoff, sleep and resume. |
-| `runner` | Browser starts, audio routing, volume, restarts. |
+| `runner` | Audio routing per browser process, volume, Save & Apply summaries. |
 | `sound` | A device started playing, or has been silent for 10 s (e.g. a radio stream dropped). |
 | `login` / `viewer` | Log viewer logins (successful or failed, with the username tried, never the password), lockout, opened/closed. |
 
@@ -105,13 +108,6 @@ All-time click counts are also kept in `spa-audio-stats.json`, so they survive l
 It refreshes every 5 s. To change its login, put the SHA-256 of `username:password` in `credentialHash` in
 [cmd/logviewer/main.go](cmd/logviewer/main.go), then rebuild.
 The login only protects the viewer. The XML file itself can be read by anyone with access to the folder.
-
-### Useful extra args
-
-| Browser | Args |
-|---|---|
-| Chrome / Edge / Brave | `--autoplay-policy=no-user-gesture-required --new-window` |
-| Firefox | `-new-window` (set `media.autoplay.default = 0` in `about:config` to allow autoplay) |
 
 ## Build
 

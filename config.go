@@ -9,14 +9,13 @@ import (
 	"path/filepath"
 )
 
-// Output is one audio output and the browser that should play on it.
+// Output is one device: a browser (opened by people) and the audio output
+// its sound is switched to.
 type Output struct {
 	Enabled  bool   `json:"enabled"`
 	Name     string `json:"name"`
-	DeviceID string `json:"deviceId"` // optional, e.g. {0.0.0.00000000}.{b3f8a1c2-...}; empty = Windows default
-	Browser  string `json:"browser"`  // full path to the browser .exe
-	URL      string `json:"url"`
-	Args     string `json:"args"`             // extra command-line arguments
+	DeviceID string `json:"deviceId"`         // optional, e.g. {0.0.0.00000000}.{b3f8a1c2-...}; empty = Windows default
+	Browser  string `json:"browser"`          // full path to the browser .exe
 	Volume   *int   `json:"volume,omitempty"` // browser volume 0-100; nil = 100
 
 	Description string `json:"description,omitempty"` // free text notes about this device
@@ -30,9 +29,6 @@ type Config struct {
 
 	// How long --run waits for all audio devices to appear after logon.
 	DeviceWaitSec int `json:"deviceWaitSec"`
-
-	// Relaunch a browser if it was closed (only in --run mode).
-	RestartIfClosed bool `json:"restartIfClosed"`
 }
 
 func exeDir() string {
@@ -56,7 +52,7 @@ func defaultOutput() Output {
 }
 
 func defaultConfig() *Config {
-	return &Config{DeviceWaitSec: 120, RestartIfClosed: true, Outputs: []Output{defaultOutput()}}
+	return &Config{DeviceWaitSec: 120, Outputs: []Output{defaultOutput()}}
 }
 
 func LoadConfig() (*Config, error) {

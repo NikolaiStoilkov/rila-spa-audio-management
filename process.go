@@ -103,30 +103,3 @@ func setAppDevice(svcl, deviceID string, pid uint32) (string, error) {
 	out, err := hiddenCommand(svcl, "/SetAppDefault", deviceID, "all", strconv.FormatUint(uint64(pid), 10)).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
-
-// splitArgs splits a command line into arguments, honoring double quotes.
-func splitArgs(s string) []string {
-	var args []string
-	var cur strings.Builder
-	inQuote, have := false, false
-	for _, r := range s {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-			have = true
-		case (r == ' ' || r == '\t') && !inQuote:
-			if have {
-				args = append(args, cur.String())
-				cur.Reset()
-				have = false
-			}
-		default:
-			cur.WriteRune(r)
-			have = true
-		}
-	}
-	if have {
-		args = append(args, cur.String())
-	}
-	return args
-}
