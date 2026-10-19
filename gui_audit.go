@@ -79,7 +79,14 @@ func (a *app) fieldChanged(s *slotUI, field, value string, kv ...string) {
 	}
 	device := a.deviceLabel(s)
 	audit("info", applog.EventChange, fmt.Sprintf("%s: %s changed", device, field),
-		append([]string{"device", device, "field", field, "old", old, "new", value, "saved", "no"}, kv...)...)
+		append([]string{"device", device, "field", field, "old", old, "new", value, "saved", savedNow[field]}, kv...)...)
+}
+
+// savedNow tells, per field, whether a change is saved immediately.
+var savedNow = map[string]string{
+	"Audio output": "yes (saved immediately)",
+	"Enabled":      "no", "Device name": "no", "Browser": "no", "Volume": "no",
+	"URL": "no", "Extra args": "no", "Description": "no",
 }
 
 // snapshot records the starting values of a tab so later edits log old -> new.

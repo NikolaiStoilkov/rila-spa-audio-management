@@ -401,10 +401,11 @@ func (a *app) addSlot(o Output) *slotUI {
 				ColumnSpan: 2,
 				OnCurrentIndexChanged: func() {
 					idx := s.detected.CurrentIndex()
-					if idx < 0 || idx >= len(a.devices) {
-						return
+					if a.busy || idx < 0 || idx >= len(a.devices) {
+						return // a.busy: the list is being filled, not a user choice
 					}
 					s.deviceID.SetText(a.devices[idx].ID)
+					a.audioOutputChosen(s)
 				},
 			},
 
@@ -415,8 +416,9 @@ func (a *app) addSlot(o Output) *slotUI {
 				OnTextChanged: func() { a.updateStatus(s) },
 			},
 			PushButton{Text: "Clear", OnClicked: a.on("Clear audio output", s, func() {
-				s.detected.SetCurrentIndex(-1)
+				a.withBusy(func() { s.detected.SetCurrentIndex(-1) })
 				s.deviceID.SetText("")
+				a.audioOutputChosen(s)
 			})},
 
 			Label{Text: ""},
@@ -506,7 +508,7 @@ func (a *app) addSlot(o Output) *slotUI {
 	s.volume.SetValue(o.VolumePercent())
 	s.volBox.SetValue(float64(o.VolumePercent()))
 	s.desc.SetText(strings.ReplaceAll(o.Description, "\n", "\r\n"))
-	s.detected.SetModel(a.deviceLabels())
+	a.fillDetected(s, a.deviceLabels())
 
 	a.slots = append(a.slots, s)
 	a.selectBrowser(s, o.Browser)
@@ -577,8 +579,7 @@ func (a *app) refreshDevices() {
 	a.devices = devices
 	labels := a.deviceLabels()
 	for _, s := range a.slots {
-		s.detected.SetModel(labels)
-		s.detected.SetCurrentIndex(-1)
+		a.fillDetected(s, labels)
 		a.updateStatus(s)
 	}
 	active := 0
@@ -915,5 +916,89 @@ func (a *app) volumeChanged(s *slotUI) {
 				}
 			})
 		})
+	})
+}
+
+func (a *app) withBusy(f func()) {
+	busy := a.busy
+	a.busy = true
+	defer func() { a.busy = busy }()
+	f()
+}
+
+// fillDetected refills the Audio output list and selects the saved device,
+// so the dropdown always shows what is stored.
+func (a *app) fillDetected(s *slotUI, labels []string) {
+	a.withBusy(func() {
+		s.detected.SetModel(labels)
+		idx := -1
+		if id := NormalizeID(s.deviceID.Text()); id != "" {
+			for i, d := range a.devices {
+				if strings.EqualFold(d.ID, id) {
+					idx = i
+					break
+				}
+			}
+		}
+		s.detected.SetCurrentIndex(idx)
+	})
+}
+
+// audioOutputChosen saves the tab's audio output to config.json right away
+// (only that field, so other unsaved edits are not saved with it) and
+// routes the running browser to it.
+func (a *app) audioOutputChosen(s *slotUI) {
+	i := a.slotIndex(s)
+	if i < 0 || i >= len(a.cfg.Outputs) {
+		return
+	}
+	id := NormalizeID(s.deviceID.Text())
+	a.cfg.Outputs[i].DeviceID = id
+
+	saved := false
+	if _, err := os.Stat(configPath()); err == nil {
+		if disk, err := LoadConfig(); err == nil && i < len(disk.Outputs) {
+			disk.Outputs[i].DeviceID = id
+			if err := disk.Save(); err == nil {
+				saved = true
+				if a.saved != nil && i < len(a.saved.Outputs) {
+					a.saved.Outputs[i].DeviceID = id
+				}
+			}
+		}
+	}
+	if !saved {
+		// First save, or a device tab that has never been saved: save everything.
+		saved = a.save(false)
+	}
+
+	label := "Windows default output"
+	if d, ok := FindDevice(a.devices, id); ok {
+		label = d.Label()
+	}
+	dev := a.deviceLabel(s)
+	if saved {
+		audit("info", applog.EventSave, dev+": audio output saved: "+label, "device", dev, "audio_output", label, "hardware_id", id)
+	}
+
+	// Use it now: the background runner and the browser if it is running.
+	browser := a.selectedBrowser(s)
+	if browser == "" {
+		return
+	}
+	if a.runner != nil {
+		a.runner.SetDevice(browser, id)
+	}
+	target := id
+	if target == "" {
+		target = "DefaultRenderDevice"
+	}
+	svcl := a.cfg.svcl()
+	safeGo("route audio output", func() {
+		for _, pid := range pidsForExe(browser) {
+			if out, err := setAppDevice(svcl, target, pid); err != nil {
+				a.logf("%s: routing pid %d failed: %v %s", dev, pid, err, out)
+			}
+		}
 	})
 }

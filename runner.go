@@ -45,6 +45,18 @@ func (r *Runner) SetVolume(browser string, vol int) {
 	delete(r.volSet, strings.ToLower(filepath.Clean(browser)))
 }
 
+// SetDevice changes the audio output for a browser while running; its
+// processes are re-routed on the next pass.
+func (r *Runner) SetDevice(browser, deviceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, o := range r.cfg.Outputs {
+		if samePath(o.Browser, browser) {
+			r.cfg.Outputs[i].DeviceID = deviceID
+		}
+	}
+}
+
 func (r *Runner) enabled() []Output {
 	r.mu.Lock()
 	defer r.mu.Unlock()

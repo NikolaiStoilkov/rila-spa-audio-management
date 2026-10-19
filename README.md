@@ -29,7 +29,8 @@ It has two programs:
    and put `svcl.exe` in the same folder.
 3. Start `spa-audio.exe`. It opens with one device tab. On later starts, the first device with an active audio output is selected:
    - Click the **+** tab to add another device. Use **Remove this output** inside a tab to delete it.
-   - Pick an **Audio output** (optional). **Device ID** is read-only and is filled in from that list.
+   - Pick an **Audio output** (optional). **It is saved to config.json immediately** (only that field) and applied to the running browser.
+     There's no need to press Save. **Device ID** is read-only and is filled in from that list.
      To see every output with its hardware ID, click **List all devices**.
    - Pick a **Browser** from the dropdown. The program scans the PC for installed browsers: the ones registered with Windows,
      App Paths, and the usual install folders. Use **Browse...** to add a portable copy, and **Rescan browsers** after installing a new one.
