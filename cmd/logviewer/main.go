@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"rila-spa-audio/internal/applog"
@@ -109,11 +110,12 @@ type viewer struct {
 	stats       *statModel
 	path        string
 	all         []applog.Entry
-	modTime     time.Time
+	offset      int64       // bytes of the log already read
+	loading     atomic.Bool // a background read is running
 }
 
 var events = []string{"All", applog.EventApp, applog.EventAction, applog.EventChange, applog.EventSave,
-	applog.EventMouse, applog.EventWindow, applog.EventTab, applog.EventSystem, applog.EventRunner,
+	applog.EventMouse, applog.EventWindow, applog.EventTab, applog.EventSystem, applog.EventRunner, applog.EventSound,
 	applog.EventLogin, applog.EventViewer}
 
 func exeDir() string {
@@ -127,6 +129,8 @@ func exeDir() string {
 func main() {
 	path := filepath.Join(exeDir(), "spa-audio-log.xml")
 	audit = applog.New(path, "viewer")
+	defer audit.Flush()
+	applog.CaptureCrashes(audit, filepath.Join(exeDir(), "log-viewer-crash.txt"))
 	user, ok := login()
 	if !ok {
 		return
@@ -300,7 +304,7 @@ func (v *viewer) run() {
 
 	v.reload()
 	go func() {
-		for range time.Tick(5 * time.Second) {
+		for range time.Tick(2 * time.Second) {
 			v.mw.Synchronize(func() {
 				if v.autoRefresh.Checked() {
 					v.reload()
@@ -312,37 +316,64 @@ func (v *viewer) run() {
 	v.mw.Run()
 }
 
+// forceReload drops everything and reads the whole log again.
 func (v *viewer) forceReload() {
-	v.modTime = time.Time{}
+	v.offset = 0
+	v.all = nil
 	v.reload()
 }
 
+// reload reads only what was added since the last read, in the background,
+// so the window stays responsive with large logs. The first read parses the
+// file on all CPU cores.
 func (v *viewer) reload() {
-	fi, err := os.Stat(v.path)
-	if err == nil && fi.ModTime().Equal(v.modTime) {
-		return // unchanged; keep selection and scroll position
-	}
-	entries, err := applog.ReadFile(v.path)
-	if err != nil {
-		v.all = nil
-		v.applyFilter()
-		if os.IsNotExist(err) {
-			v.status.SetText("No log yet: " + v.path)
-		} else {
-			v.status.SetText("Cannot read " + v.path + ": " + err.Error())
-		}
+	if v.loading.Swap(true) {
 		return
 	}
-	v.modTime = fi.ModTime()
-	if v.withOld.Checked() {
-		old := strings.TrimSuffix(v.path, ".xml") + ".old.xml"
-		if more, err := applog.ReadFile(old); err == nil {
-			entries = append(more, entries...)
-		}
+	path, offset, withOld := v.path, v.offset, v.withOld.Checked()
+	if offset == 0 {
+		v.status.SetText("Loading " + path + " ...")
 	}
-	v.all = entries
-	v.applyFilter()
-	v.loadStats()
+	go func() {
+		defer applog.Recover(audit, "log viewer loading")
+		started := time.Now()
+		entries, next, reset, err := applog.ReadNew(path, offset)
+		full := offset == 0 || reset
+		if err == nil && full && withOld {
+			old := strings.TrimSuffix(path, ".xml") + ".old.xml"
+			if more, err := applog.ReadFile(old); err == nil {
+				entries = append(more, entries...)
+			}
+		}
+		took := time.Since(started)
+		v.mw.Synchronize(func() {
+			defer v.loading.Store(false)
+			if path != v.path {
+				return // another file was opened meanwhile
+			}
+			if err != nil {
+				if os.IsNotExist(err) {
+					v.status.SetText("No log yet: " + path)
+				} else {
+					v.status.SetText("Cannot read " + path + ": " + err.Error())
+				}
+				return
+			}
+			v.offset = next
+			if full {
+				v.all = entries
+			} else if len(entries) == 0 {
+				return // nothing new; keep selection and scroll position
+			} else {
+				v.all = append(v.all, entries...)
+			}
+			v.applyFilter()
+			v.loadStats()
+			if full {
+				audit.Log("info", applog.EventViewer, "Log loaded", "entries", strconv.Itoa(len(v.all)), "took", took.Round(time.Millisecond).String())
+			}
+		})
+	}()
 }
 
 func (v *viewer) applyFilter() {
@@ -351,20 +382,20 @@ func (v *viewer) applyFilter() {
 	}
 	level, event := v.level.Text(), v.event.Text()
 	search := strings.ToLower(strings.TrimSpace(v.search.Text()))
-	var rows []applog.Entry
-	for _, e := range v.all {
+	rows := make([]applog.Entry, 0, len(v.all))
+	for i := len(v.all) - 1; i >= 0; i-- { // newest first (the log is in time order)
+		e := v.all[i]
 		if level != "All" && e.Level != level {
 			continue
 		}
 		if event != "All" && e.Event != event {
 			continue
 		}
-		if search != "" && !strings.Contains(strings.ToLower(e.Message()+" "+e.Details()+" "+e.User), search) {
+		if search != "" && !strings.Contains(e.Haystack, search) {
 			continue
 		}
 		rows = append(rows, e)
 	}
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].When.After(rows[j].When) }) // newest first
 	v.model.rows = rows
 	v.model.PublishRowsReset()
 	v.status.SetText(fmt.Sprintf("%d of %d entries  -  %s  -  double-click a row for all details", len(rows), len(v.all), v.path))
@@ -478,6 +509,7 @@ func (v *viewer) openFile() {
 	dlg := walk.FileDialog{Title: "Open log", Filter: "XML log (*.xml)|*.xml", FilePath: v.path}
 	if ok, _ := dlg.ShowOpen(v.mw); ok {
 		v.path = dlg.FilePath
+		v.loading.Store(false)
 		v.forceReload()
 	}
 }

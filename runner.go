@@ -143,9 +143,18 @@ func (r *Runner) LaunchAll() {
 // first plays), so this runs periodically rather than once.
 func (r *Runner) Enforce(restart bool) {
 	for {
+		// Devices are handled in parallel: each svcl call is a separate
+		// process, so several outputs are routed at the same time.
+		var wg sync.WaitGroup
 		for _, o := range r.enabled() {
-			r.enforceOne(o, restart)
+			wg.Add(1)
+			go func(o Output) {
+				defer wg.Done()
+				defer recoverGoroutine("routing " + o.Name)
+				r.enforceOne(o, restart)
+			}(o)
 		}
+		wg.Wait()
 		select {
 		case <-r.stopped:
 			return

@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ const (
 	EventTab    = "tab"    // switched device tab
 	EventSystem = "system" // Windows shutdown, logoff, sleep, resume
 	EventRunner = "runner" // browsers started, audio routed, volume
+	EventSound  = "sound"  // a device started / stopped playing sound
 	EventLogin  = "login"  // log viewer logins
 	EventViewer = "viewer" // log viewer opened / closed
 )
@@ -58,7 +60,8 @@ type Entry struct {
 	Msg     string   `xml:"msg,omitempty"`
 	Data    []Field  `xml:"data"`
 
-	When time.Time `xml:"-"`
+	When     time.Time `xml:"-"`
+	Haystack string    `xml:"-"` // lower-case message, details and user, for searching
 }
 
 func (e Entry) Message() string {
@@ -86,26 +89,38 @@ func (e Entry) Details() string {
 	return strings.Join(parts, "; ")
 }
 
+// Logger appends entries from a background goroutine, so Log never waits for
+// the disk. Entries queued at the same time are written in one go.
 type Logger struct {
 	path    string
 	mode    string
 	session string
 	user    string
 
-	mu   sync.Mutex
-	lock crossProcessLock // GUI, background run and viewer can write at once
+	queue chan []byte
+	flush chan chan struct{}
+	lock  crossProcessLock // GUI, background run and viewer can write at once
 }
 
 const (
 	xmlHeader  = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<log>\r\n"
 	xmlFooter  = "</log>\r\n"
 	maxLogSize = 5 << 20 // rotate to .old.xml above 5 MB
+	maxBatch   = 500
 )
 
 // New returns a logger for path. mode is "gui", "run" or "viewer".
 func New(path, mode string) *Logger {
-	l := &Logger{path: path, mode: mode, session: newSessionID(), user: CurrentUser()}
-	l.lock = newLock(`Local\RilaSpaAudioLog`)
+	l := &Logger{
+		path:    path,
+		mode:    mode,
+		session: newSessionID(),
+		user:    CurrentUser(),
+		queue:   make(chan []byte, 4096),
+		flush:   make(chan chan struct{}),
+		lock:    newLock(`Local\RilaSpaAudioLog`),
+	}
+	go l.writer()
 	return l
 }
 
@@ -138,7 +153,7 @@ func LevelOf(msg string) string {
 	return "info"
 }
 
-// Log writes one entry. kv are name, value pairs stored as <data> fields.
+// Log queues one entry. kv are name, value pairs stored as <data> fields.
 func (l *Logger) Log(level, event, msg string, kv ...string) {
 	if level == "" {
 		level = LevelOf(msg)
@@ -157,7 +172,11 @@ func (l *Logger) Log(level, event, msg string, kv ...string) {
 			e.Data = append(e.Data, Field{Name: kv[i], Value: kv[i+1]})
 		}
 	}
-	l.write(e)
+	data, err := xml.MarshalIndent(e, "  ", "  ")
+	if err != nil {
+		return
+	}
+	l.queue <- append(append([]byte("  "), data...), "\r\n"...)
 }
 
 // Write lets the standard log package write here (event "app").
@@ -166,21 +185,61 @@ func (l *Logger) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (l *Logger) write(e Entry) error {
-	data, err := xml.MarshalIndent(e, "  ", "  ")
-	if err != nil {
-		return err
+// Flush blocks until everything logged so far is on disk. Call it before
+// the program exits.
+func (l *Logger) Flush() {
+	done := make(chan struct{})
+	select {
+	case l.flush <- done:
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	case <-time.After(5 * time.Second):
 	}
-	data = append(append([]byte("  "), data...), "\r\n"...)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	return l.append(data)
 }
 
-func (l *Logger) append(entry []byte) error {
+func (l *Logger) writer() {
+	for {
+		select {
+		case first := <-l.queue:
+			batch := [][]byte{first}
+		more:
+			for len(batch) < maxBatch {
+				select {
+				case e := <-l.queue:
+					batch = append(batch, e)
+				default:
+					break more
+				}
+			}
+			l.writeBatch(batch)
+		case done := <-l.flush:
+			var batch [][]byte
+		drain:
+			for {
+				select {
+				case e := <-l.queue:
+					batch = append(batch, e)
+				default:
+					break drain
+				}
+			}
+			if len(batch) > 0 {
+				l.writeBatch(batch)
+			}
+			close(done)
+		}
+	}
+}
+
+func (l *Logger) writeBatch(batch [][]byte) {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	l.append(bytes.Join(batch, nil))
+}
+
+func (l *Logger) append(entries []byte) error {
 	if fi, err := os.Stat(l.path); err == nil && fi.Size() > maxLogSize {
 		old := strings.TrimSuffix(l.path, ".xml") + ".old.xml"
 		os.Remove(old)
@@ -213,29 +272,108 @@ func (l *Logger) append(entry []byte) error {
 			// Damaged (e.g. power cut mid-write): keep it aside, start fresh.
 			f.Close()
 			os.Rename(l.path, strings.TrimSuffix(l.path, ".xml")+".broken-"+time.Now().Format("20060102-150405")+".xml")
-			return l.append(entry)
+			return l.append(entries)
 		}
 		pos = size - int64(len(footer))
 	}
-	_, err = f.WriteAt(append(entry, footer...), pos)
+	_, err = f.WriteAt(append(entries, footer...), pos)
 	return err
 }
 
-// ReadFile parses a log, tolerating a file cut off mid-write.
+// ---------- reading ----------
+
+var entryEnd = []byte("</entry>")
+
+// ReadFile parses a whole log, tolerating a file cut off mid-write.
 func ReadFile(path string) ([]Entry, error) {
-	data, err := os.ReadFile(path)
+	entries, _, _, err := ReadNew(path, 0)
+	return entries, err
+}
+
+// ReadNew returns the entries completed after byte offset, and the offset to
+// pass next time. reset is true when the file was replaced or rotated and
+// the caller should drop what it had.
+func ReadNew(path string, offset int64) (entries []Entry, next int64, reset bool, err error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, offset, false, err
 	}
-	if !bytes.Contains(data, []byte("</log>")) {
-		if i := bytes.LastIndex(data, []byte("</entry>")); i >= 0 {
-			data = append(data[:i+len("</entry>")], "\r\n</log>"...)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, offset, false, err
+	}
+	if fi.Size() < offset {
+		offset, reset = 0, true // rotated: a new, smaller file
+	}
+	if fi.Size() == offset {
+		return nil, offset, reset, nil
+	}
+	data := make([]byte, fi.Size()-offset)
+	if _, err := f.ReadAt(data, offset); err != nil && err != io.EOF {
+		return nil, offset, reset, err
+	}
+	end := bytes.LastIndex(data, entryEnd)
+	if end < 0 {
+		return nil, offset, reset, nil // no complete entry yet
+	}
+	end += len(entryEnd)
+	body := data[:end]
+	if start := bytes.Index(body, []byte("<entry")); start > 0 {
+		body = body[start:]
+	}
+	entries, err = parseParallel(body)
+	return entries, offset + int64(end), reset, err
+}
+
+// parseParallel splits the entries across all CPU cores.
+func parseParallel(body []byte) ([]Entry, error) {
+	parts := runtime.NumCPU()
+	if len(body) < 256<<10 {
+		parts = 1
+	}
+	var chunks [][]byte
+	for len(body) > 0 {
+		cut := len(body)
+		if len(chunks) < parts-1 {
+			target := len(body) / (parts - len(chunks))
+			if i := bytes.Index(body[target:], entryEnd); i >= 0 {
+				cut = target + i + len(entryEnd)
+			}
 		}
+		chunks = append(chunks, body[:cut])
+		body = body[cut:]
 	}
+
+	results := make([][]Entry, len(chunks))
+	errs := make([]error, len(chunks))
+	var wg sync.WaitGroup
+	for i, c := range chunks {
+		wg.Add(1)
+		go func(i int, c []byte) {
+			defer wg.Done()
+			results[i], errs[i] = parseChunk(c)
+		}(i, c)
+	}
+	wg.Wait()
+
+	var all []Entry
+	for i, r := range results {
+		if errs[i] != nil {
+			return all, errs[i]
+		}
+		all = append(all, r...)
+	}
+	return all, nil
+}
+
+func parseChunk(c []byte) ([]Entry, error) {
 	var doc struct {
 		Entries []Entry `xml:"entry"`
 	}
-	if err := xml.Unmarshal(data, &doc); err != nil {
+	wrapped := make([]byte, 0, len(c)+16)
+	wrapped = append(append(append(wrapped, "<log>"...), c...), "</log>"...)
+	if err := xml.Unmarshal(wrapped, &doc); err != nil {
 		return nil, err
 	}
 	for i := range doc.Entries {
@@ -247,6 +385,7 @@ func ReadFile(path string) ([]Entry, error) {
 		if e.Event == "" {
 			e.Event = EventApp
 		}
+		e.Haystack = strings.ToLower(e.Message() + " " + e.Details() + " " + e.User)
 	}
 	return doc.Entries, nil
 }

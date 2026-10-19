@@ -32,6 +32,14 @@ type slotUI struct {
 	volume   *walk.Slider
 	volBox   *walk.NumberEdit // exact value, 1% steps
 	volSeq   int              // debounce counter for the volume slider
+
+	// sound indicator (gui_sound.go)
+	level     *walk.ProgressBar
+	soundText *walk.Label
+	lastLoud  time.Time // last time this browser made sound
+	soundOn   bool      // logged state: playing
+	lastPct   int
+	lastText  string
 }
 
 type app struct {
@@ -55,6 +63,7 @@ type app struct {
 	vals     map[string]string          // last logged value per tab field
 	names    map[win.HWND]func() string // control names for the mouse log
 	lastSize string                     // last logged window state
+	tabHwnd  win.HWND                   // native tab control, for tab icons
 }
 
 const appTitle = "Rila Spa Audio - outputs and browsers"
@@ -136,6 +145,7 @@ func runGUI(cfg *Config, background bool) {
 		}
 	})
 	a.startAudit()
+	a.startSoundDisplay()
 	if err := a.setupTray(); err != nil {
 		a.logf("Cannot create tray icon: %v", err)
 	}
@@ -144,15 +154,16 @@ func runGUI(cfg *Config, background bool) {
 	if background {
 		a.logf("=== Started in background (Windows startup) ===")
 		audit("info", applog.EventWindow, "Window hidden in tray (background start)")
-		go func() {
-			r := NewRunner(cfg.Clone(), a.logf)
+		startCfg := cfg.Clone()
+		safeGo("background start", func() {
+			r := NewRunner(startCfg, a.logf)
 			for _, p := range r.Check() {
 				a.logf("WARNING: %s", p)
 			}
 			r.WaitForDevices(time.Duration(cfg.DeviceWaitSec) * time.Second)
 			r.LaunchAll()
 			a.mw.Synchronize(func() { a.startRunner(cfg.RestartIfClosed) })
-		}()
+		})
 	} else {
 		a.mw.Synchronize(func() { a.showWindowFrom("program start") })
 	}
@@ -179,7 +190,7 @@ func (a *app) setupTray() error {
 	addAction("Open", func() { a.showWindowFrom("tray menu") })
 	addAction("Launch all browsers", func() {
 		r := a.startRunner(a.cfg.RestartIfClosed)
-		go r.LaunchAll()
+		safeGo("launch all", r.LaunchAll)
 	})
 	addAction("Open log viewer", a.openLogViewer)
 	ni.ContextMenu().Actions().Add(walk.NewSeparatorAction())
@@ -449,6 +460,16 @@ func (a *app) addSlot(o Output) *slotUI {
 				},
 			},
 
+			Label{Text: "Sound:"},
+			Composite{
+				Layout:     HBox{MarginsZero: true},
+				ColumnSpan: 2,
+				Children: []Widget{
+					ProgressBar{AssignTo: &s.level, MinValue: 0, MaxValue: 100, MinSize: Size{Width: 200}, MaxSize: Size{Height: 14}, StretchFactor: 2},
+					Label{AssignTo: &s.soundText, MinSize: Size{Width: 260}, StretchFactor: 1},
+				},
+			},
+
 			Label{Text: "URL:"},
 			LineEdit{AssignTo: &s.url, ColumnSpan: 2},
 
@@ -643,7 +664,8 @@ func (a *app) startRunner(restart bool) *Runner {
 	}
 	a.runner = NewRunner(a.cfg.Clone(), a.logf)
 	a.runner.restart = restart
-	go a.runner.Enforce(restart)
+	r := a.runner
+	safeGo("routing loop", func() { r.Enforce(restart) })
 	return a.runner
 }
 
@@ -658,7 +680,7 @@ func (a *app) launchAll() {
 		}
 	}
 	r := a.startRunner(a.cfg.RestartIfClosed)
-	go r.LaunchAll()
+	safeGo("launch all", r.LaunchAll)
 }
 
 func (a *app) testOne(s *slotUI) {
@@ -671,13 +693,13 @@ func (a *app) testOne(s *slotUI) {
 		return
 	}
 	r := a.startRunner(a.runner != nil && a.runner.restart)
-	go func() {
+	safeGo("test output", func() {
 		if len(pidsForExe(o.Browser)) == 0 {
 			if err := r.Launch(o); err != nil {
 				a.logf("%s: %v", o.Name, err)
 			}
 		}
-	}()
+	})
 }
 
 func (a *app) toggleAutostart() {
@@ -887,11 +909,11 @@ func (a *app) volumeChanged(s *slotUI) {
 				a.runner.SetVolume(browser, vol)
 			}
 			name, svcl, outputs := strings.TrimSpace(s.name.Text()), a.cfg.svcl(), a.cfg.Clone().Outputs
-			go func() {
+			safeGo("set volume", func() {
 				if n := applyVolume(svcl, volumeTargets(outputs, browser), vol); n > 0 {
 					a.logf("%s: volume %d%%", name, vol)
 				}
-			}()
+			})
 		})
 	})
 }

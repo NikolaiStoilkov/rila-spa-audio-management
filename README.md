@@ -33,6 +33,8 @@ It has two programs:
      To see every output with its hardware ID, click **List all devices**.
    - Pick a **Browser** from the dropdown. The program scans the PC for installed browsers: the ones registered with Windows,
      App Paths, and the usual install folders. Use **Browse...** to add a portable copy, and **Rescan browsers** after installing a new one.
+   - **Sound** shows a live level meter for that browser (the same as the green bar in the Windows volume mixer).
+     The tab shows a **green speaker** while that device is playing, and a gray one when the browser is open but silent.
    - **Volume** sets that browser's volume (the same as its slider in the Windows volume mixer). Changes apply right away.
      The program reapplies it every 30 s and at startup, so it holds even when the page starts playing later.
    - Enter the URL and any extra args. **Description** is free text for notes about the device (location, speaker model, ...).
@@ -40,6 +42,20 @@ It has two programs:
 4. Tick **Start automatically when Windows starts**.
    This adds `"C:\SpaAudio\spa-audio.exe" --run` to `HKCU\...\CurrentVersion\Run`. No admin rights are needed.
 5. Enable auto-login for the PC (`netplwiz`), so it starts after a power cut without anyone touching it.
+
+## Performance and crash reports
+
+- **Background work:**
+  - The sound meter ([meter.go](meter.go)) reads the Windows audio session meters (WASAPI via go-wca) on its own thread, 10 times a second.
+  - The window redraws levels about 7 times a second, and skips frames if it is busy.
+- **Shared process list:** one snapshot of running processes per second, shared by routing, the meter and the GUI.
+- **Parallel work:** devices are routed in parallel, and log writes are batched on a background goroutine.
+- **Priority:** the program runs at *above normal* priority, so routing and the meter stay responsive while browsers use the CPU.
+- **Log viewer:** reads only the new part of the log, in the background. Large logs are parsed on all CPU cores.
+- **Crash reports:** fatal errors (including ones `recover` cannot catch) go to `spa-audio-crash.txt` / `log-viewer-crash.txt` via `debug.SetCrashOutput`.
+  They are copied into the log as an `app` error at the next start.
+  A panic in a background goroutine is logged and only stops that goroutine.
+- **Tab icons:** set with `TCM_SETITEM` on two images added once. walk's `TabPage.SetImage` adds a new copy to the image list on every call, which would leak.
 
 ## Running in the background
 
@@ -75,6 +91,7 @@ The code is in [internal/applog](internal/applog) (shared by both programs) and 
 | `window` / `tab` | Window opened, hidden to tray, minimized/maximized/restored, focus gained/lost, device list opened/closed, tab switches. |
 | `system` | Windows shutdown/restart/logoff, sleep and resume. |
 | `runner` | Browser starts, audio routing, volume, restarts. |
+| `sound` | A device started playing, or has been silent for 10 s (e.g. a radio stream dropped). |
 | `login` / `viewer` | Log viewer logins (successful or failed, with the username tried, never the password), lockout, opened/closed. |
 
 Keystrokes and passwords are never recorded.

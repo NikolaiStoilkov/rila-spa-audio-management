@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,31 +17,64 @@ import (
 
 const createNoWindow = 0x08000000
 
+// procCache holds one process snapshot (exe path -> PIDs) shared by the
+// runner, the sound meter and the GUI, refreshed at most once a second.
+var procCache struct {
+	sync.Mutex
+	at     time.Time
+	byPath map[string][]uint32
+	paths  map[uint32]string // PID -> exe path; paths never change for a PID
+}
+
+func pathKey(p string) string { return strings.ToLower(filepath.Clean(p)) }
+
+// processesByPath maps lower-case exe path -> running PIDs.
+func processesByPath() map[string][]uint32 {
+	procCache.Lock()
+	defer procCache.Unlock()
+	if time.Since(procCache.at) < time.Second && procCache.byPath != nil {
+		return procCache.byPath
+	}
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return procCache.byPath
+	}
+	defer windows.CloseHandle(snap)
+
+	if procCache.paths == nil {
+		procCache.paths = map[uint32]string{}
+	}
+	alive := map[uint32]bool{}
+	byPath := map[string][]uint32{}
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	for err = windows.Process32First(snap, &pe); err == nil; err = windows.Process32Next(snap, &pe) {
+		pid := pe.ProcessID
+		alive[pid] = true
+		name := strings.ToLower(windows.UTF16ToString(pe.ExeFile[:]))
+		path, ok := procCache.paths[pid]
+		if !ok || (path != "." && filepath.Base(path) != name) { // new, or PID reused by another program
+			path = pathKey(processPath(pid))
+			procCache.paths[pid] = path
+		}
+		if path != "" && path != "." {
+			byPath[path] = append(byPath[path], pid)
+		}
+	}
+	for pid := range procCache.paths {
+		if !alive[pid] {
+			delete(procCache.paths, pid)
+		}
+	}
+	procCache.byPath, procCache.at = byPath, time.Now()
+	return byPath
+}
+
 // pidsForExe returns all running processes whose image path equals exePath.
 // Matching by full path (not just name) lets two copies of the same browser
 // in different folders be routed to different outputs.
 func pidsForExe(exePath string) []uint32 {
-	want := strings.ToLower(filepath.Clean(exePath))
-	base := strings.ToLower(filepath.Base(exePath))
-
-	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
-		return nil
-	}
-	defer windows.CloseHandle(snap)
-
-	var pids []uint32
-	var pe windows.ProcessEntry32
-	pe.Size = uint32(unsafe.Sizeof(pe))
-	for err = windows.Process32First(snap, &pe); err == nil; err = windows.Process32Next(snap, &pe) {
-		if strings.ToLower(windows.UTF16ToString(pe.ExeFile[:])) != base {
-			continue
-		}
-		if strings.ToLower(filepath.Clean(processPath(pe.ProcessID))) == want {
-			pids = append(pids, pe.ProcessID)
-		}
-	}
-	return pids
+	return processesByPath()[pathKey(exePath)]
 }
 
 func processPath(pid uint32) string {

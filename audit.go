@@ -115,11 +115,11 @@ func startSession(mode string, cfg *Config) {
 		"autostart", strconv.FormatBool(AutostartEnabled()))
 
 	writeSessionState(mode)
-	go func() {
+	safeGo("session heartbeat", func() {
 		for range time.Tick(time.Minute) {
 			writeSessionState(mode)
 		}
-	}()
+	})
 }
 
 // endSession logs a clean end once and removes the session marker.
@@ -130,19 +130,37 @@ func endSession(reason string, kv ...string) {
 			"ran_for", roundDur(time.Since(sessionStart)),
 			"clicks_this_session", strconv.Itoa(stats.sessionTotal()))
 		audit("info", applog.EventApp, "Program stopped: "+reason, kv...)
+		auditLog.Flush()
 		os.Remove(sessionPath())
 	})
 }
 
-// logPanics records a crash with its stack trace, then lets it crash.
+// logPanics records a crash on the main (window) thread with its stack
+// trace, then lets it crash.
 func logPanics() {
 	if r := recover(); r != nil {
 		buf := make([]byte, 16<<10)
 		buf = buf[:runtime.Stack(buf, false)]
 		audit("error", applog.EventApp, fmt.Sprintf("Program crashed: %v", r), "stack", string(buf))
+		auditLog.Flush()
 		os.Remove(sessionPath()) // already logged as a crash
 		panic(r)
 	}
+}
+
+// recoverGoroutine is deferred in background goroutines (see applog.Recover).
+func recoverGoroutine(what string) {
+	if auditLog != nil {
+		applog.Recover(auditLog, what)
+	}
+}
+
+// safeGo runs f in a goroutine that cannot crash the program.
+func safeGo(what string, f func()) {
+	go func() {
+		defer recoverGoroutine(what)
+		f()
+	}()
 }
 
 func roundDur(d time.Duration) string {

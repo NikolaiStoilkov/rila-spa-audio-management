@@ -1,6 +1,7 @@
 package applog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ func TestConcurrentWritesStayValid(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+	l.Flush()
 
 	entries, err := ReadFile(path)
 	if err != nil {
@@ -45,6 +47,7 @@ func TestStdLogWriterAndLevels(t *testing.T) {
 	l.Write([]byte("WARNING: device missing\n"))
 	l.Write([]byte("Device 1: routing pid 5 failed\n"))
 	l.Write([]byte("All audio devices are ready\n"))
+	l.Flush()
 	entries, err := ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +72,9 @@ func TestReadsOldFormatAndDamagedFiles(t *testing.T) {
 	// A damaged file is moved aside and a new one started.
 	path := filepath.Join(dir, "log.xml")
 	os.WriteFile(path, []byte("<log><entry"), 0o644)
-	New(path, "gui").Log("info", EventApp, "fresh")
+	fresh := New(path, "gui")
+	fresh.Log("info", EventApp, "fresh")
+	fresh.Flush()
 	entries, err = ReadFile(path)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("recovery: %v %d", err, len(entries))
@@ -81,5 +86,50 @@ func TestReadsOldFormatAndDamagedFiles(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if !strings.HasSuffix(string(data), "</log>\r\n") {
 		t.Fatal("file does not end with </log>")
+	}
+}
+
+func TestIncrementalAndParallelRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log.xml")
+	l := New(path, "gui")
+	for i := 0; i < 3000; i++ { // > 256 KB, so it is parsed on several cores
+		l.Log("info", EventMouse, fmt.Sprintf("click %d", i), "cursor_screen", "1,2")
+	}
+	l.Flush()
+
+	all, off, reset, err := ReadNew(path, 0)
+	if err != nil || reset || len(all) != 3000 {
+		t.Fatalf("first read: %v reset=%v n=%d", err, reset, len(all))
+	}
+	for i, e := range all {
+		if e.Message() != fmt.Sprintf("click %d", i) {
+			t.Fatalf("entry %d out of order: %q", i, e.Message())
+		}
+	}
+	if !strings.Contains(all[5].Haystack, "click 5") || !strings.Contains(all[5].Haystack, "cursor_screen=1,2") {
+		t.Fatalf("haystack: %q", all[5].Haystack)
+	}
+
+	// Nothing new.
+	if more, off2, _, _ := ReadNew(path, off); len(more) != 0 || off2 != off {
+		t.Fatalf("expected nothing new, got %d", len(more))
+	}
+
+	// Only the new entries are returned.
+	l.Log("warning", EventSound, "Device 1: no sound")
+	l.Flush()
+	more, _, reset, err := ReadNew(path, off)
+	if err != nil || reset || len(more) != 1 || more[0].Event != EventSound {
+		t.Fatalf("incremental: %v %v %+v", err, reset, more)
+	}
+
+	// A smaller (rotated) file resets.
+	os.Remove(path)
+	l2 := New(path, "gui")
+	l2.Log("info", EventApp, "new file")
+	l2.Flush()
+	more, _, reset, err = ReadNew(path, off)
+	if err != nil || !reset || len(more) != 1 {
+		t.Fatalf("rotation: %v reset=%v n=%d", err, reset, len(more))
 	}
 }

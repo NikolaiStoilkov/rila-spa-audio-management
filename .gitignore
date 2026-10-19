@@ -7,3 +7,6 @@ svcl.exe
 /logviewer
 spa-audio.session
 spa-audio-stats.json
+spa-audio-crash*.txt
+log-viewer-crash*.txt
+.idea/

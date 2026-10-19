@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime/debug"
 
 	"rila-spa-audio/internal/applog"
 
@@ -23,9 +25,17 @@ func main() {
 		mode = "run"
 	}
 	auditLog = applog.New(logPath(), mode)
+	defer auditLog.Flush()
 	log.SetFlags(0) // the XML entry carries the timestamp
 	log.SetOutput(auditLog)
+	applog.CaptureCrashes(auditLog, filepath.Join(exeDir(), "spa-audio-crash.txt"))
 	defer logPanics()
+
+	// Dedicated audio PC: keep routing and the sound meter responsive even
+	// when the browsers keep the CPU busy, and trade some memory for less
+	// garbage-collection work.
+	windows.SetPriorityClass(windows.CurrentProcess(), windows.ABOVE_NORMAL_PRIORITY_CLASS)
+	debug.SetGCPercent(200)
 
 	cfg, err := LoadConfig()
 	if err != nil {
