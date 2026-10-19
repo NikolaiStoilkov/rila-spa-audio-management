@@ -1,5 +1,7 @@
 dist/
 *.log
+spa-audio-log*.xml
 config.json
 svcl.exe
 /rila-spa-audio
+/logviewer

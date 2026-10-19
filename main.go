@@ -7,51 +7,49 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"time"
 
+	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 )
 
 func main() {
-	run := flag.Bool("run", false, "headless mode: wait for devices, start browsers, keep routing (used at Windows startup)")
+	run := flag.Bool("run", false, "start hidden in the system tray, wait for devices, start browsers, keep routing (used at Windows startup)")
 	flag.Parse()
 
-	logFile, err := os.OpenFile(filepath.Join(exeDir(), "spa-audio.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err == nil {
-		log.SetOutput(logFile)
-		defer logFile.Close()
+	mode := "gui"
+	if *run {
+		mode = "run"
 	}
+	log.SetFlags(0) // the XML entry carries the timestamp
+	log.SetOutput(newXMLLog(logPath(), mode))
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		fatal("Cannot read config.json: " + err.Error())
 	}
 
-	if *run {
-		runHeadless(cfg)
-		return
-	}
-	runGUI(cfg)
-}
-
-func runHeadless(cfg *Config) {
-	// Only one background instance at a time.
-	name, _ := windows.UTF16PtrFromString(`Local\RilaSpaAudioRun`)
+	// One instance only. Starting the exe again brings the running one to the front.
+	name, _ := windows.UTF16PtrFromString(`Local\RilaSpaAudioApp`)
 	if _, err := windows.CreateMutex(nil, false, name); err == windows.ERROR_ALREADY_EXISTS {
+		if !*run {
+			showRunningInstance()
+		}
 		log.Println("Already running, exiting")
 		return
 	}
 
-	logf := func(format string, args ...any) { log.Printf(format, args...) }
-	r := NewRunner(cfg, logf)
-	logf("=== Startup ===")
-	for _, p := range r.Check() {
-		logf("WARNING: %s", p)
+	runGUI(cfg, *run)
+}
+
+func showRunningInstance() {
+	title, _ := windows.UTF16PtrFromString(appTitle)
+	if h := win.FindWindow(nil, title); h != 0 {
+		win.ShowWindow(h, win.SW_SHOW)
+		if win.IsIconic(h) {
+			win.ShowWindow(h, win.SW_RESTORE)
+		}
+		win.SetForegroundWindow(h)
 	}
-	r.WaitForDevices(time.Duration(cfg.DeviceWaitSec) * time.Second)
-	r.LaunchAll()
-	r.Enforce(cfg.RestartIfClosed) // runs until the user logs off
 }
 
 func fatal(msg string) {

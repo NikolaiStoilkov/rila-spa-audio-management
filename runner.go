@@ -20,6 +20,7 @@ type Runner struct {
 	mu      sync.Mutex
 	routed  map[uint32]string // pid -> device ID already applied
 	stopped chan struct{}
+	restart bool // relaunch closed browsers
 }
 
 func NewRunner(cfg *Config, logf func(string, ...any)) *Runner {
@@ -48,7 +49,9 @@ func (r *Runner) Check() []string {
 		if _, err := os.Stat(o.Browser); err != nil {
 			problems = append(problems, fmt.Sprintf("%s: browser not found: %s", o.Name, o.Browser))
 		}
-		if d, ok := FindDevice(devices, o.DeviceID); !ok {
+		if o.DeviceID == "" {
+			// optional: plays on the Windows default output
+		} else if d, ok := FindDevice(devices, o.DeviceID); !ok {
 			problems = append(problems, fmt.Sprintf("%s: device ID %q is unknown to Windows", o.Name, o.DeviceID))
 		} else if d.State != deviceActive {
 			problems = append(problems, fmt.Sprintf("%s: device %q is %s", o.Name, d.Label(), stateText(d.State)))
@@ -69,6 +72,9 @@ func (r *Runner) WaitForDevices(timeout time.Duration) {
 		devices, _ := ActiveDevices()
 		var missing []string
 		for _, o := range r.enabled() {
+			if o.DeviceID == "" {
+				continue
+			}
 			if _, ok := FindDevice(devices, o.DeviceID); !ok {
 				missing = append(missing, o.Name)
 			}
@@ -129,10 +135,6 @@ func (r *Runner) Enforce(restart bool) {
 }
 
 func (r *Runner) enforceOne(o Output, restart bool) {
-	id := NormalizeID(o.DeviceID)
-	if id == "" {
-		return
-	}
 	pids := pidsForExe(o.Browser)
 	if len(pids) == 0 {
 		if restart {
@@ -142,6 +144,12 @@ func (r *Runner) enforceOne(o Output, restart bool) {
 			}
 		}
 		return
+	}
+	// No device: reset to the Windows default, since Windows remembers
+	// earlier per-app routing for this .exe.
+	id := NormalizeID(o.DeviceID)
+	if id == "" {
+		id = "DefaultRenderDevice"
 	}
 	for _, pid := range pids {
 		r.mu.Lock()
