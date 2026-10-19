@@ -1,4 +1,4 @@
-# Generates winres/icon.png (256px) and winres/icon16.png. Usage: python3 winres/make_icon.py winres
+# Generates winres/icon.ico (16-256px) and winres/icon.png (256px preview). Usage: python3 winres/make_icon.py winres
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
@@ -55,7 +55,10 @@ def draw_icon(size, with_text):
         img.alpha_composite(lotus.resize((size, size)))
     return img
 
-big = draw_icon(S, True).resize((256, 256), Image.LANCZOS)
-big.save(out + "/icon.png")
-small = draw_icon(S, False).resize((16, 16), Image.LANCZOS)
-small.save(out + "/icon16.png")
+# Small sizes show the speaker only; "SPA" and the lotus are unreadable below 48px.
+full, simple = draw_icon(S, True), draw_icon(S, False)
+sizes = [256, 128, 64, 48, 32, 24, 16]
+images = [(full if n >= 48 else simple).resize((n, n), Image.LANCZOS) for n in sizes]
+images[0].save(out + "/icon.png")
+# BMP entries: Explorer shows PNG-compressed small icons unreliably.
+images[0].save(out + "/icon.ico", sizes=[(n, n) for n in sizes], append_images=images[1:], bitmap_format="bmp")
