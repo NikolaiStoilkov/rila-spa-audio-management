@@ -47,7 +47,7 @@ func runGUI(cfg *Config) {
 	err := MainWindow{
 		AssignTo: &a.mw,
 		Title:    "Rila Spa Audio - outputs and browsers",
-		MinSize:  Size{Width: 900, Height: 600},
+		MinSize:  Size{Width: 600, Height: 450},
 		Size:     Size{Width: 1150, Height: 820},
 		Layout:   VBox{},
 		Children: []Widget{
@@ -60,12 +60,18 @@ func runGUI(cfg *Config) {
 					HSpacer{},
 				},
 			},
-			Composite{
-				Layout:   Grid{Columns: 2, MarginsZero: true},
-				Children: groups,
+			ScrollView{
+				Layout: VBox{MarginsZero: true},
+				Children: []Widget{
+					Composite{
+						Layout:   Grid{Columns: 2, MarginsZero: true},
+						MinSize:  Size{Width: 860},
+						Children: groups,
+					},
+				},
 			},
 			Label{Text: "Log:"},
-			TextEdit{AssignTo: &a.logView, ReadOnly: true, VScroll: true, MinSize: Size{Height: 120}},
+			TextEdit{AssignTo: &a.logView, ReadOnly: true, VScroll: true, MinSize: Size{Height: 100}, MaxSize: Size{Height: 140}},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
