@@ -10,9 +10,11 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 )
 
 type slotUI struct {
+	page     *walk.TabPage
 	enabled  *walk.CheckBox
 	name     *walk.LineEdit
 	deviceID *walk.LineEdit
@@ -37,18 +39,18 @@ func runGUI(cfg *Config) {
 	a := &app{cfg: cfg}
 	a.devices, _ = ListRenderDevices()
 
-	var groups []Widget
+	var pages []TabPage
 	for i := range cfg.Outputs {
 		s := &slotUI{}
 		a.slots = append(a.slots, s)
-		groups = append(groups, a.slotGroup(i, s))
+		pages = append(pages, a.slotPage(i, s))
 	}
 
 	err := MainWindow{
 		AssignTo: &a.mw,
 		Title:    "Rila Spa Audio - outputs and browsers",
-		MinSize:  Size{Width: 600, Height: 450},
-		Size:     Size{Width: 1150, Height: 820},
+		MinSize:  Size{Width: 640, Height: 480},
+		Size:     Size{Width: 900, Height: 620},
 		Layout:   VBox{},
 		Children: []Widget{
 			Composite{
@@ -56,22 +58,15 @@ func runGUI(cfg *Config) {
 				Children: []Widget{
 					PushButton{Text: "Refresh devices", OnClicked: a.refreshDevices},
 					PushButton{Text: "Copy device list", OnClicked: a.copyDeviceList},
-					Label{Text: "Pick a detected device or type/paste the ID manually: {0.0.0.00000000}.{GUID}"},
 					HSpacer{},
 				},
 			},
-			ScrollView{
-				Layout: VBox{MarginsZero: true},
-				Children: []Widget{
-					Composite{
-						Layout:   Grid{Columns: 2, MarginsZero: true},
-						MinSize:  Size{Width: 860},
-						Children: groups,
-					},
-				},
+			TabWidget{
+				Pages:         pages,
+				StretchFactor: 3,
 			},
 			Label{Text: "Log:"},
-			TextEdit{AssignTo: &a.logView, ReadOnly: true, VScroll: true, MinSize: Size{Height: 100}, MaxSize: Size{Height: 140}},
+			TextEdit{AssignTo: &a.logView, ReadOnly: true, VScroll: true, StretchFactor: 1, MinSize: Size{Height: 80}},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
@@ -87,6 +82,9 @@ func runGUI(cfg *Config) {
 		fatal("Cannot create window: " + err.Error())
 	}
 
+	if icon, err := walk.Resources.Icon("APP"); err == nil {
+		a.mw.SetIcon(icon)
+	}
 	a.autostart.SetChecked(AutostartEnabled())
 	a.loadIntoUI()
 	a.refreshDevices()
@@ -95,21 +93,39 @@ func runGUI(cfg *Config) {
 			a.runner.Stop()
 		}
 	})
+	// Open maximized (normal window with title bar and taskbar, not full screen).
+	a.mw.Synchronize(func() { win.ShowWindow(a.mw.Handle(), win.SW_SHOWMAXIMIZED) })
 	a.mw.Run()
 }
 
-func (a *app) slotGroup(i int, s *slotUI) Widget {
-	return GroupBox{
-		Title:  fmt.Sprintf("Output %d", i+1),
-		Layout: Grid{Columns: 3},
+func tabTitle(i int, name string) string {
+	if name = strings.TrimSpace(name); name == "" {
+		return fmt.Sprintf("Output %d", i+1)
+	}
+	return fmt.Sprintf("%d. %s", i+1, name)
+}
+
+func (a *app) slotPage(i int, s *slotUI) TabPage {
+	return TabPage{
+		AssignTo: &s.page,
+		Title:    tabTitle(i, a.cfg.Outputs[i].Name),
+		Layout:   Grid{Columns: 3},
 		Children: []Widget{
 			Label{Text: "Enabled:"},
 			CheckBox{AssignTo: &s.enabled, ColumnSpan: 2},
 
 			Label{Text: "Room name:"},
-			LineEdit{AssignTo: &s.name, ColumnSpan: 2},
+			LineEdit{
+				AssignTo:   &s.name,
+				ColumnSpan: 2,
+				OnTextChanged: func() {
+					if s.page != nil {
+						s.page.SetTitle(tabTitle(i, s.name.Text()))
+					}
+				},
+			},
 
-			Label{Text: "Detected:"},
+			Label{Text: "Detected device:"},
 			ComboBox{
 				AssignTo:   &s.detected,
 				ColumnSpan: 2,
@@ -125,9 +141,13 @@ func (a *app) slotGroup(i int, s *slotUI) Widget {
 			Label{Text: "Device ID:"},
 			LineEdit{
 				AssignTo:      &s.deviceID,
-				ColumnSpan:    2,
+				ReadOnly:      true,
 				OnTextChanged: func() { a.updateStatus(s) },
 			},
+			PushButton{Text: "Clear", OnClicked: func() {
+				s.detected.SetCurrentIndex(-1)
+				s.deviceID.SetText("")
+			}},
 
 			Label{Text: ""},
 			Label{AssignTo: &s.status, ColumnSpan: 2},
@@ -140,8 +160,19 @@ func (a *app) slotGroup(i int, s *slotUI) Widget {
 			LineEdit{AssignTo: &s.url, ColumnSpan: 2},
 
 			Label{Text: "Extra args:"},
-			LineEdit{AssignTo: &s.args},
-			PushButton{Text: "Test", OnClicked: func() { a.testOne(i) }},
+			LineEdit{AssignTo: &s.args, ColumnSpan: 2},
+
+			Label{Text: ""},
+			Composite{
+				Layout:     HBox{MarginsZero: true},
+				ColumnSpan: 2,
+				Children: []Widget{
+					PushButton{Text: "Test this output", OnClicked: func() { a.testOne(i) }},
+					HSpacer{},
+				},
+			},
+
+			VSpacer{ColumnSpan: 3},
 		},
 	}
 }

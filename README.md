@@ -22,10 +22,12 @@ It has a GUI for entering the hardware (endpoint) IDs, and a background mode tha
 3. (Recommended) In *Settings → System → Sound*, rename each output, e.g. "Room 1".
 4. Start `spa-audio.exe`:
    - Click **Refresh devices**.
-   - For each output, pick a device in **Detected**, or type/paste the ID into **Device ID**.
-     A bare GUID, the full ID, or a `SWD\MMDEVAPI\...` path are all accepted. The status line shows whether Windows knows the ID.
+   - Each output has its own tab. Pick the device in **Detected device**.
+     **Device ID** is read-only and is filled in from that list (use **Clear** to empty it).
+     The status line shows whether the device is active.
+     To enter an ID by hand, edit `deviceId` in `config.json`. A bare GUID, the full ID, or a `SWD\MMDEVAPI\...` path are all accepted.
    - Pick the browser .exe, the URL, and any extra args.
-   - Click **Test** on each output to check it, then **Save & Launch all**.
+   - Click **Test this output** on each tab to check it, then **Save & Launch all**.
 5. Tick **Start automatically when Windows starts**.
    This adds `"C:\SpaAudio\spa-audio.exe" --run` to `HKCU\...\CurrentVersion\Run`. No admin rights are needed.
 6. Enable auto-login for the PC (`netplwiz`), so it starts after a power cut without anyone touching it.

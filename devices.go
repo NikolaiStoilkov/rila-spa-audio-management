@@ -14,8 +14,8 @@ import (
 const renderKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render`
 
 const (
-	propFriendlyName = "{a45c254e-df1c-4efd-8020-67d146a850e0},2"  // "Speakers"
-	propAdapterName  = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"  // "Realtek(R) Audio"
+	propFriendlyName = "{a45c254e-df1c-4efd-8020-67d146a850e0},2" // "Speakers"
+	propAdapterName  = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6" // "Realtek(R) Audio"
 	renderPrefix     = "{0.0.0.00000000}."
 	deviceActive     = 1
 )
