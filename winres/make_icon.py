@@ -1,8 +1,54 @@
 # Generates winres/icon.ico (16-256px) and winres/icon.png (256px preview). Usage: python3 winres/make_icon.py winres
+import io
+import struct
 import sys
+
 from PIL import Image, ImageDraw, ImageFont
 
 out = sys.argv[1]
+
+def bmp_entry(img):
+    """32-bit BMP icon image: header, BGRA rows bottom-up, then the 1-bit AND mask
+    (required by Windows even with alpha; without it Explorer shows the default icon)."""
+    w, h = img.size
+    px = img.convert("RGBA").load()
+    header = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    xor = bytearray()
+    for y in range(h - 1, -1, -1):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            xor += bytes((b, g, r, a))
+    row = ((w + 31) // 32) * 4
+    mask = bytearray()
+    for y in range(h - 1, -1, -1):
+        bits = bytearray(row)
+        for x in range(w):
+            if px[x, y][3] == 0:
+                bits[x // 8] |= 0x80 >> (x % 8)
+        mask += bits
+    return header + bytes(xor) + bytes(mask)
+
+
+def write_ico(path, images):
+    """256px as PNG (standard for Vista+), smaller sizes as BMP."""
+    blobs = []
+    for img in images:
+        if img.size[0] >= 256:
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            blobs.append(buf.getvalue())
+        else:
+            blobs.append(bmp_entry(img))
+    data = struct.pack("<HHH", 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    for img, blob in zip(images, blobs):
+        w = img.size[0]
+        data += struct.pack("<BBBBHHII", w % 256, w % 256, 0, 0, 1, 32, len(blob), offset)
+        offset += len(blob)
+    with open(path, "wb") as f:
+        f.write(data + b"".join(blobs))
+
+
 S = 1024
 
 def gradient(size, top, bottom):
@@ -60,5 +106,4 @@ full, simple = draw_icon(S, True), draw_icon(S, False)
 sizes = [256, 128, 64, 48, 32, 24, 16]
 images = [(full if n >= 48 else simple).resize((n, n), Image.LANCZOS) for n in sizes]
 images[0].save(out + "/icon.png")
-# BMP entries: Explorer shows PNG-compressed small icons unreliably.
-images[0].save(out + "/icon.ico", sizes=[(n, n) for n in sizes], append_images=images[1:], bitmap_format="bmp")
+write_ico(out + "/icon.ico", images)
