@@ -28,8 +28,8 @@ type slotUI struct {
 	args     *walk.LineEdit
 	desc     *walk.TextEdit
 	volume   *walk.Slider
-	volLabel *walk.Label
-	volSeq   int // debounce counter for the volume slider
+	volBox   *walk.NumberEdit // exact value, 1% steps
+	volSeq   int              // debounce counter for the volume slider
 }
 
 type app struct {
@@ -381,13 +381,34 @@ func (a *app) addSlot(o Output) *slotUI {
 				AssignTo:       &s.volume,
 				MinValue:       0,
 				MaxValue:       100,
+				LineSize:       1, // arrow keys and mouse wheel
+				PageSize:       1, // clicking the bar, Page Up/Down
+				Tracking:       true,
 				ToolTipsHidden: true,
 				OnValueChanged: func() {
-					s.volLabel.SetText(fmt.Sprintf("%d%%", s.volume.Value()))
+					if s.volBox != nil && int(s.volBox.Value()) != s.volume.Value() {
+						s.volBox.SetValue(float64(s.volume.Value()))
+					}
 					a.volumeChanged(s)
 				},
 			},
-			Label{AssignTo: &s.volLabel, MinSize: Size{Width: 40}},
+			NumberEdit{
+				AssignTo:           &s.volBox,
+				MinValue:           0,
+				MaxValue:           100,
+				Decimals:           0,
+				Increment:          1,
+				SpinButtonsVisible: true,
+				Suffix:             " %",
+				MinSize:            Size{Width: 70},
+				OnValueChanged: func() {
+					v := int(s.volBox.Value())
+					if s.volume != nil && v != s.volume.Value() {
+						s.volume.SetValue(v) // SetValue does not raise ValueChanged
+						a.volumeChanged(s)
+					}
+				},
+			},
 
 			Label{Text: "URL:"},
 			LineEdit{AssignTo: &s.url, ColumnSpan: 2},
@@ -423,7 +444,7 @@ func (a *app) addSlot(o Output) *slotUI {
 	s.url.SetText(o.URL)
 	s.args.SetText(o.Args)
 	s.volume.SetValue(o.VolumePercent())
-	s.volLabel.SetText(fmt.Sprintf("%d%%", o.VolumePercent()))
+	s.volBox.SetValue(float64(o.VolumePercent()))
 	s.desc.SetText(strings.ReplaceAll(o.Description, "\n", "\r\n"))
 	s.detected.SetModel(a.deviceLabels())
 
