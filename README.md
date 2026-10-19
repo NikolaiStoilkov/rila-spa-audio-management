@@ -25,12 +25,14 @@ It has two programs:
 1. Create `C:\SpaAudio\` and copy `dist\spa-audio.exe` and `dist\log-viewer.exe` into it.
 2. Download **SoundVolumeCommandLine** (`svcl.exe`, 64-bit) from https://www.nirsoft.net/utils/sound_volume_command_line.html
    and put `svcl.exe` in the same folder.
-3. Start `spa-audio.exe`. It opens with one device tab:
+3. Start `spa-audio.exe`. It opens with one device tab. On later starts, the first device with an active audio output is selected:
    - Click the **+** tab to add another device. Use **Remove this output** inside a tab to delete it.
    - Pick an **Audio output** (optional). **Device ID** is read-only and is filled in from that list.
      To see every output with its hardware ID, click **List all devices**.
    - Pick a **Browser** from the dropdown. The program scans the PC for installed browsers: the ones registered with Windows,
      App Paths, and the usual install folders. Use **Browse...** to add a portable copy, and **Rescan browsers** after installing a new one.
+   - **Volume** sets that browser's volume (the same as its slider in the Windows volume mixer). Changes apply right away.
+     The program reapplies it every 30 s and at startup, so it holds even when the page starts playing later.
    - Enter the URL and any extra args. **Description** is free text for notes about the device (location, speaker model, ...).
    - Click **Test this output** on each tab to check it, then **Save & Launch all**.
 4. Tick **Start automatically when Windows starts**.

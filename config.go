@@ -16,7 +16,8 @@ type Output struct {
 	DeviceID string `json:"deviceId"` // optional, e.g. {0.0.0.00000000}.{b3f8a1c2-...}; empty = Windows default
 	Browser  string `json:"browser"`  // full path to the browser .exe
 	URL      string `json:"url"`
-	Args     string `json:"args"` // extra command-line arguments
+	Args     string `json:"args"`             // extra command-line arguments
+	Volume   *int   `json:"volume,omitempty"` // browser volume 0-100; nil = 100
 
 	Description string `json:"description,omitempty"` // free text notes about this device
 }
@@ -90,6 +91,13 @@ func (c *Config) svcl() string {
 		return c.SvclPath
 	}
 	return filepath.Join(exeDir(), "svcl.exe")
+}
+
+func (o Output) VolumePercent() int {
+	if o.Volume == nil {
+		return 100
+	}
+	return min(max(*o.Volume, 0), 100)
 }
 
 // Clone returns a copy that is safe to use from another goroutine.

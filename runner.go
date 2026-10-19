@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,16 +19,35 @@ type Runner struct {
 	logf func(format string, args ...any)
 
 	mu      sync.Mutex
-	routed  map[uint32]string // pid -> device ID already applied
+	routed  map[uint32]string    // pid -> device ID already applied
+	volSet  map[string]time.Time // browser path -> when its volume was last applied
 	stopped chan struct{}
 	restart bool // relaunch closed browsers
 }
 
+// Volume is re-applied this often, so audio sessions that start later
+// (e.g. when the page begins playing) get it too.
+const volumeEvery = 30 * time.Second
+
 func NewRunner(cfg *Config, logf func(string, ...any)) *Runner {
-	return &Runner{cfg: cfg, logf: logf, routed: map[uint32]string{}, stopped: make(chan struct{})}
+	return &Runner{cfg: cfg, logf: logf, routed: map[uint32]string{}, volSet: map[string]time.Time{}, stopped: make(chan struct{})}
+}
+
+// SetVolume changes the volume for a browser while running; it is applied on the next pass.
+func (r *Runner) SetVolume(browser string, vol int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, o := range r.cfg.Outputs {
+		if samePath(o.Browser, browser) {
+			r.cfg.Outputs[i].Volume = &vol
+		}
+	}
+	delete(r.volSet, strings.ToLower(filepath.Clean(browser)))
 }
 
 func (r *Runner) enabled() []Output {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var outs []Output
 	for _, o := range r.cfg.Outputs {
 		if o.Enabled && o.Browser != "" {
@@ -168,6 +188,54 @@ func (r *Runner) enforceOne(o Output, restart bool) {
 		r.mu.Unlock()
 		r.logf("%s: pid %d -> %s", o.Name, pid, id)
 	}
+
+	key := strings.ToLower(filepath.Clean(o.Browser))
+	r.mu.Lock()
+	due := time.Since(r.volSet[key]) >= volumeEvery
+	r.mu.Unlock()
+	if due {
+		applyVolume(r.cfg.svcl(), volumeTargets(r.enabled(), o.Browser), o.VolumePercent())
+		r.mu.Lock()
+		r.volSet[key] = time.Now()
+		r.mu.Unlock()
+	}
+}
+
+func samePath(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
+// volumeTargets says what to pass to svcl /SetVolume for a browser: its exe
+// name (one call covers every audio session of that browser) unless another
+// device uses an exe with the same name, then each process ID.
+func volumeTargets(outputs []Output, browser string) []string {
+	pids := pidsForExe(browser)
+	if len(pids) == 0 {
+		return nil
+	}
+	base := filepath.Base(browser)
+	for _, o := range outputs {
+		if o.Enabled && !samePath(o.Browser, browser) && strings.EqualFold(filepath.Base(o.Browser), base) {
+			targets := make([]string, len(pids))
+			for i, pid := range pids {
+				targets[i] = strconv.FormatUint(uint64(pid), 10)
+			}
+			return targets
+		}
+	}
+	return []string{base}
+}
+
+// applyVolume sets the per-application volume (Windows volume mixer) and
+// returns how many svcl calls succeeded.
+func applyVolume(svcl string, targets []string, vol int) int {
+	ok := 0
+	for _, t := range targets {
+		if hiddenCommand(svcl, "/SetVolume", t, strconv.Itoa(vol)).Run() == nil {
+			ok++
+		}
+	}
+	return ok
 }
 
 func (r *Runner) Stop() {

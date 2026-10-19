@@ -27,6 +27,9 @@ type slotUI struct {
 	url      *walk.LineEdit
 	args     *walk.LineEdit
 	desc     *walk.TextEdit
+	volume   *walk.Slider
+	volLabel *walk.Label
+	volSeq   int // debounce counter for the volume slider
 }
 
 type app struct {
@@ -100,17 +103,19 @@ func runGUI(cfg *Config, background bool) {
 		a.mw.SetIcon(icon)
 	}
 
+	// Device tabs first, "+" last: if "+" exists first, Windows keeps it
+	// selected while the other tabs are inserted in front of it.
 	a.busy = true
+	for _, o := range cfg.Outputs {
+		a.addSlot(o)
+	}
 	if a.plusPage, err = walk.NewTabPage(); err != nil {
 		fatal("Cannot create tab: " + err.Error())
 	}
 	a.plusPage.SetTitle("  +  ")
 	a.plusPage.SetLayout(walk.NewVBoxLayout())
 	a.tabs.Pages().Add(a.plusPage)
-	for _, o := range cfg.Outputs {
-		a.addSlot(o)
-	}
-	a.tabs.SetCurrentIndex(0)
+	a.selectTab(a.firstActiveTab())
 	a.busy = false
 	a.tabs.CurrentIndexChanged().Attach(a.onTabChanged)
 
@@ -230,7 +235,7 @@ func (a *app) onTabChanged() {
 		defer func() { a.busy = false }()
 		a.readFromUI()
 		s := a.addSlot(a.newOutput())
-		a.tabs.SetCurrentIndex(a.tabs.Pages().Index(s.page))
+		a.selectTab(a.tabs.Pages().Index(s.page))
 		a.updateStatus(s)
 		s.name.SetFocus()
 	})
@@ -250,6 +255,44 @@ func (a *app) newOutput() Output {
 		}
 	}
 	return o
+}
+
+// firstActiveTab is the first enabled device with an active audio output,
+// else the first enabled device, else the first tab.
+func (a *app) firstActiveTab() int {
+	first := -1
+	for i, o := range a.cfg.Outputs {
+		if !o.Enabled {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		if d, ok := FindDevice(a.devices, o.DeviceID); ok && d.State == deviceActive {
+			return i
+		}
+	}
+	if first < 0 {
+		first = 0
+	}
+	return first
+}
+
+// selectTab shows tab i. walk skips SetCurrentIndex when it believes i is
+// already current, which goes wrong after tabs are inserted in front of the
+// current one, so switch away first to force a real change.
+func (a *app) selectTab(i int) {
+	n := a.tabs.Pages().Len()
+	if i < 0 || i >= n {
+		return
+	}
+	busy := a.busy
+	a.busy = true
+	if a.tabs.CurrentIndex() == i && n > 1 {
+		a.tabs.SetCurrentIndex((i + 1) % n)
+	}
+	a.tabs.SetCurrentIndex(i)
+	a.busy = busy
 }
 
 func (a *app) slotIndex(s *slotUI) int {
@@ -333,6 +376,19 @@ func (a *app) addSlot(o Output) *slotUI {
 			ComboBox{AssignTo: &s.browser},
 			PushButton{Text: "Browse...", OnClicked: func() { a.browse(s) }},
 
+			Label{Text: "Volume:"},
+			Slider{
+				AssignTo:       &s.volume,
+				MinValue:       0,
+				MaxValue:       100,
+				ToolTipsHidden: true,
+				OnValueChanged: func() {
+					s.volLabel.SetText(fmt.Sprintf("%d%%", s.volume.Value()))
+					a.volumeChanged(s)
+				},
+			},
+			Label{AssignTo: &s.volLabel, MinSize: Size{Width: 40}},
+
 			Label{Text: "URL:"},
 			LineEdit{AssignTo: &s.url, ColumnSpan: 2},
 
@@ -366,12 +422,14 @@ func (a *app) addSlot(o Output) *slotUI {
 	s.browser.SetModel(a.browserLabels())
 	s.url.SetText(o.URL)
 	s.args.SetText(o.Args)
+	s.volume.SetValue(o.VolumePercent())
+	s.volLabel.SetText(fmt.Sprintf("%d%%", o.VolumePercent()))
 	s.desc.SetText(strings.ReplaceAll(o.Description, "\n", "\r\n"))
 	s.detected.SetModel(a.deviceLabels())
 
 	a.slots = append(a.slots, s)
 	a.selectBrowser(s, o.Browser)
-	a.tabs.Pages().Insert(a.tabs.Pages().Index(a.plusPage), page)
+	a.tabs.Pages().Insert(len(a.slots)-1, page) // just before "+"
 	page.SetTitle(tabTitle(len(a.slots)-1, o.Name))
 	return s
 }
@@ -398,7 +456,7 @@ func (a *app) removeSlot(s *slotUI) {
 	if i >= len(a.slots) {
 		i = len(a.slots) - 1
 	}
-	a.tabs.SetCurrentIndex(i)
+	a.selectTab(i)
 	a.readFromUI()
 }
 
@@ -412,6 +470,7 @@ func (a *app) readFromUI() {
 			Browser:     a.selectedBrowser(s),
 			URL:         strings.TrimSpace(s.url.Text()),
 			Args:        strings.TrimSpace(s.args.Text()),
+			Volume:      intPtr(s.volume.Value()),
 			Description: strings.TrimSpace(strings.ReplaceAll(s.desc.Text(), "\r\n", "\n")),
 		})
 	}
@@ -730,4 +789,38 @@ func (a *app) rescanBrowsers() {
 	}
 	a.setBrowserList(list)
 	a.logf("Found %d browsers", len(list))
+}
+
+func intPtr(v int) *int { return &v }
+
+// volumeChanged applies the slider value to the running browser right away
+// (debounced while the slider is being dragged) and to the background runner.
+func (a *app) volumeChanged(s *slotUI) {
+	if a.busy || s.volume == nil || a.slotIndex(s) < 0 {
+		return
+	}
+	vol := s.volume.Value()
+	a.cfg.Outputs[a.slotIndex(s)].Volume = intPtr(vol)
+	browser := a.selectedBrowser(s)
+	if browser == "" {
+		return
+	}
+	s.volSeq++
+	seq := s.volSeq
+	time.AfterFunc(300*time.Millisecond, func() {
+		a.mw.Synchronize(func() {
+			if seq != s.volSeq {
+				return // a newer value is pending
+			}
+			if a.runner != nil {
+				a.runner.SetVolume(browser, vol)
+			}
+			name, svcl, outputs := strings.TrimSpace(s.name.Text()), a.cfg.svcl(), a.cfg.Clone().Outputs
+			go func() {
+				if n := applyVolume(svcl, volumeTargets(outputs, browser), vol); n > 0 {
+					a.logf("%s: volume %d%%", name, vol)
+				}
+			}()
+		})
+	})
 }
