@@ -1,6 +1,8 @@
 # rila-spa-audio-management
 
 A Windows tool that plays a different browser on each audio output.
+
+📖 User guide in Bulgarian: [docs/user-guide-bg.md](docs/user-guide-bg.md) (copied into `dist/` by the build).
 It has two programs:
 
 | Program | Purpose |
