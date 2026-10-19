@@ -5,3 +5,5 @@ config.json
 svcl.exe
 /rila-spa-audio
 /logviewer
+spa-audio.session
+spa-audio-stats.json

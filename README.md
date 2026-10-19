@@ -52,21 +52,39 @@ It has two programs:
 
 ## Logs
 
-Logs are written to `spa-audio-log.xml`, next to `spa-audio.exe`:
+Logs are **not shown in spa-audio.exe**. They are written to `spa-audio-log.xml`, next to the exe, and read with `log-viewer.exe`.
+The code is in [internal/applog](internal/applog) (shared by both programs) and [audit.go](audit.go) / [gui_audit.go](gui_audit.go).
 
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<log>
-  <entry time="2026-10-19T13:40:01+03:00" level="info" mode="run">Device 1: started chrome.exe (pid 4120)</entry>
-</log>
+<entry time="2026-10-19T13:40:01.123+03:00" level="info" event="action" mode="gui" session="3f9a1c2e" user="SPA-PC\reception">
+  <msg>Clicked "Test this output" on 2. Pool</msg>
+  <data name="count_session">3</data>
+  <data name="count_total">41</data>
+  <data name="cursor_screen">812,644</data>
+  <data name="cursor_window">804,612</data>
+</entry>
 ```
 
-- `level` is `info`, `warning` or `error`.
-- `mode` is `gui` when the program was started by hand, and `run` when it was started at Windows startup.
-- Above 5 MB the file is renamed to `spa-audio-log.old.xml`.
+| event | Logged |
+|---|---|
+| `app` | Start (user, computer, Windows version, exe, outputs), stop with reason and run time, a second start attempt, crashes with stack trace, and **unclean ends** (killed, crash, power loss). These are detected at the next start from the leftover `spa-audio.session` heartbeat file. |
+| `action` | Every button, tray menu and tray icon click: control, device tab, click count this session and all time, cursor position, window state. Also Yes/No answers to questions. |
+| `change` | Setting edits with old → new value (text fields when focus leaves them), autostart, removed devices, unsaved changes lost on quit. |
+| `save` | Each Save with the list of changes since the last save. |
+| `mouse` | Every mouse click inside the program (thread-local hook): button, control under the cursor (including the title bar and the X button), screen and window coordinates. |
+| `window` / `tab` | Window opened, hidden to tray, minimized/maximized/restored, focus gained/lost, device list opened/closed, tab switches. |
+| `system` | Windows shutdown/restart/logoff, sleep and resume. |
+| `runner` | Browser starts, audio routing, volume, restarts. |
+| `login` / `viewer` | Log viewer logins (successful or failed, with the username tried, never the password), lockout, opened/closed. |
 
-`log-viewer.exe` must be in the same folder. It can filter by level, mode and text, refreshes every 5 s, and can open other log files.
-To change its login, put the SHA-256 of `username:password` in `credentialHash` in
+Keystrokes and passwords are never recorded.
+All-time click counts are also kept in `spa-audio-stats.json`, so they survive log rotation. Above 5 MB the log is renamed to `spa-audio-log.old.xml`.
+
+`log-viewer.exe` must be in the same folder. It has two tabs:
+- **Log:** filters by level, event and text; double-click a row to see all its fields.
+- **Click statistics:** click counts per control.
+
+It refreshes every 5 s. To change its login, put the SHA-256 of `username:password` in `credentialHash` in
 [cmd/logviewer/main.go](cmd/logviewer/main.go), then rebuild.
 The login only protects the viewer. The XML file itself can be read by anyone with access to the folder.
 

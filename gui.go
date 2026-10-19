@@ -4,12 +4,14 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"rila-spa-audio/internal/applog"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -37,7 +39,6 @@ type app struct {
 	mw        *walk.MainWindow
 	tabs      *walk.TabWidget
 	plusPage  *walk.TabPage // last tab, "+": clicking it adds an output
-	logView   *walk.TextEdit
 	autostart *walk.CheckBox
 	slots     []*slotUI
 	devices   []Device  // all known render devices
@@ -48,6 +49,12 @@ type app struct {
 	quitting  bool // true only after "Quit the program" in the tray menu
 	shown     bool // window has been shown at least once
 	trayTip   bool // "still running" balloon already shown
+
+	// audit log state (gui_audit.go)
+	saved    *Config                    // settings as last saved
+	vals     map[string]string          // last logged value per tab field
+	names    map[win.HWND]func() string // control names for the mouse log
+	lastSize string                     // last logged window state
 }
 
 const appTitle = "Rila Spa Audio - outputs and browsers"
@@ -71,10 +78,10 @@ func runGUI(cfg *Config, background bool) {
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
-					PushButton{Text: "Refresh devices", OnClicked: a.refreshDevices},
-					PushButton{Text: "Copy device list", OnClicked: a.copyDeviceList},
-					PushButton{Text: "List all devices", OnClicked: a.showDeviceList},
-					PushButton{Text: "Rescan browsers", OnClicked: a.rescanBrowsers},
+					PushButton{Text: "Refresh devices", OnClicked: a.on("Refresh devices", nil, a.refreshDevices)},
+					PushButton{Text: "Copy device list", OnClicked: a.on("Copy device list", nil, a.copyDeviceList)},
+					PushButton{Text: "List all devices", OnClicked: a.on("List all devices", nil, a.showDeviceList)},
+					PushButton{Text: "Rescan browsers", OnClicked: a.on("Rescan browsers", nil, a.rescanBrowsers)},
 					HSpacer{},
 				},
 			},
@@ -82,15 +89,13 @@ func runGUI(cfg *Config, background bool) {
 				AssignTo:      &a.tabs,
 				StretchFactor: 3,
 			},
-			Label{Text: "Log:"},
-			TextEdit{AssignTo: &a.logView, ReadOnly: true, VScroll: true, StretchFactor: 1, MinSize: Size{Height: 80}},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
-					CheckBox{AssignTo: &a.autostart, Text: "Start automatically when Windows starts", OnClicked: a.toggleAutostart},
+					CheckBox{AssignTo: &a.autostart, Text: "Start automatically when Windows starts", OnClicked: a.on("Start automatically when Windows starts", nil, a.toggleAutostart)},
 					HSpacer{},
-					PushButton{Text: "Save", OnClicked: func() { a.save(true) }},
-					PushButton{Text: "Save && Launch all", OnClicked: a.launchAll},
+					PushButton{Text: "Save", OnClicked: a.on("Save", nil, func() { a.save(true) })},
+					PushButton{Text: "Save && Launch all", OnClicked: a.on("Save & Launch all", nil, a.launchAll)},
 				},
 			},
 		},
@@ -118,6 +123,9 @@ func runGUI(cfg *Config, background bool) {
 	a.selectTab(a.firstActiveTab())
 	a.busy = false
 	a.tabs.CurrentIndexChanged().Attach(a.onTabChanged)
+	for _, s := range a.slots {
+		a.snapshot(s)
+	}
 
 	a.autostart.SetChecked(AutostartEnabled())
 	a.refreshDevices()
@@ -127,6 +135,7 @@ func runGUI(cfg *Config, background bool) {
 			a.hideToTray()
 		}
 	})
+	a.startAudit()
 	if err := a.setupTray(); err != nil {
 		a.logf("Cannot create tray icon: %v", err)
 	}
@@ -134,6 +143,7 @@ func runGUI(cfg *Config, background bool) {
 
 	if background {
 		a.logf("=== Started in background (Windows startup) ===")
+		audit("info", applog.EventWindow, "Window hidden in tray (background start)")
 		go func() {
 			r := NewRunner(cfg.Clone(), a.logf)
 			for _, p := range r.Check() {
@@ -144,7 +154,7 @@ func runGUI(cfg *Config, background bool) {
 			a.mw.Synchronize(func() { a.startRunner(cfg.RestartIfClosed) })
 		}()
 	} else {
-		a.mw.Synchronize(a.showWindow)
+		a.mw.Synchronize(func() { a.showWindowFrom("program start") })
 	}
 	a.mw.Run()
 }
@@ -163,10 +173,10 @@ func (a *app) setupTray() error {
 	addAction := func(text string, onClick func()) {
 		act := walk.NewAction()
 		act.SetText(text)
-		act.Triggered().Attach(onClick)
+		act.Triggered().Attach(a.on("Tray menu: "+text, nil, onClick))
 		ni.ContextMenu().Actions().Add(act)
 	}
-	addAction("Open", a.showWindow)
+	addAction("Open", func() { a.showWindowFrom("tray menu") })
 	addAction("Launch all browsers", func() {
 		r := a.startRunner(a.cfg.RestartIfClosed)
 		go r.LaunchAll()
@@ -176,11 +186,22 @@ func (a *app) setupTray() error {
 	addAction("Quit the program", a.quit)
 
 	ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
-		if button == walk.LeftButton {
-			a.showWindow()
+		switch button {
+		case walk.LeftButton:
+			a.action("Tray icon (left click)", nil)
+			a.showWindowFrom("tray icon click")
+		case walk.RightButton:
+			a.action("Tray icon (right click - menu)", nil)
 		}
 	})
 	return ni.SetVisible(true)
+}
+
+func (a *app) showWindowFrom(source string) {
+	if !win.IsWindowVisible(a.mw.Handle()) || win.IsIconic(a.mw.Handle()) {
+		audit("info", applog.EventWindow, "Window opened from "+source, "source", source)
+	}
+	a.showWindow()
 }
 
 func (a *app) showWindow() {
@@ -199,6 +220,11 @@ func (a *app) showWindow() {
 }
 
 func (a *app) hideToTray() {
+	kv := append([]string{"how", "close button (X) or Alt+F4"}, cursorFields(a.mw.Handle())...)
+	if changes := a.unsavedChanges(); len(changes) > 0 {
+		kv = append(kv, "unsaved_changes", strings.Join(changes, " | "))
+	}
+	audit("info", applog.EventWindow, "Window closed - program keeps running in the tray", kv...)
 	a.mw.Hide()
 	if !a.trayTip && a.tray != nil {
 		a.trayTip = true
@@ -207,10 +233,15 @@ func (a *app) hideToTray() {
 }
 
 func (a *app) quit() {
-	if walk.MsgBox(a.mw, "Quit", "Quit Rila Spa Audio?\n\nBrowsers keep playing, but closed browsers will no longer be restarted.", walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
+	if !a.ask("Quit", "Quit Rila Spa Audio?\n\nBrowsers keep playing, but closed browsers will no longer be restarted.", walk.MsgBoxIconQuestion) {
 		return
 	}
-	a.logf("Quit from tray menu")
+	var kv []string
+	if changes := a.unsavedChanges(); len(changes) > 0 {
+		kv = append(kv, "unsaved_changes_lost", strings.Join(changes, " | "))
+		audit("warning", applog.EventChange, fmt.Sprintf("Quit with %d unsaved change(s)", len(changes)), kv...)
+	}
+	endSession("Quit the program (tray menu)", kv...)
 	a.quitting = true
 	if a.runner != nil {
 		a.runner.Stop()
@@ -226,7 +257,14 @@ func (a *app) openLogViewer() {
 }
 
 func (a *app) onTabChanged() {
-	if a.busy || a.tabs.CurrentIndex() != a.tabs.Pages().Index(a.plusPage) {
+	if a.busy {
+		return
+	}
+	if i := a.tabs.CurrentIndex(); i >= 0 && i < len(a.slots) {
+		audit("info", applog.EventTab, "Opened tab "+a.deviceLabel(a.slots[i]), "tab", a.deviceLabel(a.slots[i]))
+		return
+	}
+	if a.tabs.CurrentIndex() != a.tabs.Pages().Index(a.plusPage) {
 		return
 	}
 	// Defer: changing tabs from inside the change handler confuses the control.
@@ -235,6 +273,7 @@ func (a *app) onTabChanged() {
 		defer func() { a.busy = false }()
 		a.readFromUI()
 		s := a.addSlot(a.newOutput())
+		a.action("+ (add device)", s, "browser", a.selectedBrowser(s))
 		a.selectTab(a.tabs.Pages().Index(s.page))
 		a.updateStatus(s)
 		s.name.SetFocus()
@@ -364,17 +403,17 @@ func (a *app) addSlot(o Output) *slotUI {
 				ReadOnly:      true,
 				OnTextChanged: func() { a.updateStatus(s) },
 			},
-			PushButton{Text: "Clear", OnClicked: func() {
+			PushButton{Text: "Clear", OnClicked: a.on("Clear audio output", s, func() {
 				s.detected.SetCurrentIndex(-1)
 				s.deviceID.SetText("")
-			}},
+			})},
 
 			Label{Text: ""},
 			Label{AssignTo: &s.status, ColumnSpan: 2},
 
 			Label{Text: "Browser:"},
 			ComboBox{AssignTo: &s.browser},
-			PushButton{Text: "Browse...", OnClicked: func() { a.browse(s) }},
+			PushButton{Text: "Browse...", OnClicked: a.on("Browse... (browser)", s, func() { a.browse(s) })},
 
 			Label{Text: "Volume:"},
 			Slider{
@@ -424,9 +463,9 @@ func (a *app) addSlot(o Output) *slotUI {
 				Layout:     HBox{MarginsZero: true},
 				ColumnSpan: 2,
 				Children: []Widget{
-					PushButton{Text: "Test this output", OnClicked: func() { a.testOne(s) }},
+					PushButton{Text: "Test this output", OnClicked: a.on("Test this output", s, func() { a.testOne(s) })},
 					HSpacer{},
-					PushButton{Text: "Remove this output", OnClicked: func() { a.removeSlot(s) }},
+					PushButton{Text: "Remove this output", OnClicked: a.on("Remove this output", s, func() { a.removeSlot(s) })},
 				},
 			},
 
@@ -452,6 +491,8 @@ func (a *app) addSlot(o Output) *slotUI {
 	a.selectBrowser(s, o.Browser)
 	a.tabs.Pages().Insert(len(a.slots)-1, page) // just before "+"
 	page.SetTitle(tabTitle(len(a.slots)-1, o.Name))
+	a.trackSlot(s)
+	a.snapshot(s)
 	return s
 }
 
@@ -465,9 +506,10 @@ func (a *app) removeSlot(s *slotUI) {
 		return
 	}
 	msg := fmt.Sprintf("Remove %q?\n\nClick Save afterwards to keep the change.", tabTitle(i, s.name.Text()))
-	if walk.MsgBox(a.mw, "Remove output", msg, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
+	if !a.ask("Remove output", msg, walk.MsgBoxIconQuestion) {
 		return
 	}
+	audit("info", applog.EventChange, "Removed device "+tabTitle(i, s.name.Text())+" (not saved yet)", "device", tabTitle(i, s.name.Text()))
 	a.busy = true
 	defer func() { a.busy = false }()
 	a.slots = append(a.slots[:i], a.slots[i+1:]...)
@@ -551,7 +593,10 @@ func (a *app) updateStatus(s *slotUI) {
 func (a *app) browse(s *slotUI) {
 	dlg := walk.FileDialog{Title: "Choose browser", Filter: "Programs (*.exe)|*.exe", FilePath: a.selectedBrowser(s)}
 	if ok, _ := dlg.ShowOpen(a.mw); ok {
+		audit("info", applog.EventAction, "Chose browser file", "device", a.deviceLabel(s), "file", dlg.FilePath)
 		a.selectBrowser(s, dlg.FilePath)
+	} else {
+		audit("info", applog.EventAction, "Browse for browser cancelled", "device", a.deviceLabel(s))
 	}
 }
 
@@ -574,6 +619,7 @@ func (a *app) save(showProblems bool) bool {
 		return false
 	}
 	a.logf("Saved %s", configPath())
+	a.logSave()
 	if a.runner != nil {
 		a.startRunner(a.runner.restart)
 	}
@@ -607,7 +653,7 @@ func (a *app) launchAll() {
 	}
 	if problems := NewRunner(a.cfg, a.logf).Check(); len(problems) > 0 {
 		msg := strings.Join(problems, "\n\n") + "\n\nLaunch anyway?"
-		if walk.MsgBox(a.mw, "Check configuration", msg, walk.MsgBoxYesNo|walk.MsgBoxIconWarning) != walk.DlgCmdYes {
+		if !a.ask("Check configuration", msg, walk.MsgBoxIconWarning) {
 			return
 		}
 	}
@@ -641,6 +687,8 @@ func (a *app) toggleAutostart() {
 		a.autostart.SetChecked(!on)
 		return
 	}
+	audit("info", applog.EventChange, "Autostart "+map[bool]string{true: "enabled", false: "disabled"}[on],
+		"field", "Start automatically when Windows starts", "old", strconv.FormatBool(!on), "new", strconv.FormatBool(on), "saved", "yes")
 	if on {
 		a.logf("Autostart enabled: runs \"spa-audio.exe --run\" at logon")
 	} else {
@@ -648,16 +696,10 @@ func (a *app) toggleAutostart() {
 	}
 }
 
-// logf is safe to call from any goroutine.
+// logf writes to the log file only (shown in log-viewer.exe, not in this
+// window). Safe to call from any goroutine.
 func (a *app) logf(format string, args ...any) {
-	line := fmt.Sprintf(format, args...)
-	log.Println(line)
-	if a.mw == nil {
-		return
-	}
-	a.mw.Synchronize(func() {
-		a.logView.AppendText(time.Now().Format("15:04:05 ") + line + "\r\n")
-	})
+	audit("", applog.EventRunner, fmt.Sprintf(format, args...))
 }
 
 type deviceTable struct {
@@ -693,7 +735,7 @@ func (a *app) showDeviceList() {
 		}
 		d := model.rows[i]
 		if err := walk.Clipboard().SetText(d.ID); err == nil {
-			a.logf("Copied hardware ID of %s", d.Label())
+			a.action("Copy hardware ID", nil, "output_name", d.Label(), "hardware_id", d.ID)
 		}
 	}
 
@@ -736,7 +778,11 @@ func (a *app) showDeviceList() {
 		a.logf("Cannot open device list: %v", err)
 		return
 	}
+	a.nameControl(table, func() string { return "device list table" })
+	opened := time.Now()
+	audit("info", applog.EventWindow, "Device list window opened", "devices", strconv.Itoa(len(model.rows)))
 	dlg.Run()
+	audit("info", applog.EventWindow, "Device list window closed", "open_for", roundDur(time.Since(opened)))
 }
 
 func (a *app) browserLabels() []string {
@@ -771,6 +817,9 @@ func (a *app) setBrowserList(list []Browser) {
 	}
 	a.browsers = list
 	labels := a.browserLabels()
+	busy := a.busy
+	a.busy = true // refilling the lists is not a user change
+	defer func() { a.busy = busy }()
 	for i, s := range a.slots {
 		s.browser.SetModel(labels)
 		s.browser.SetCurrentIndex(a.browserIndex(selected[i]))
@@ -833,6 +882,7 @@ func (a *app) volumeChanged(s *slotUI) {
 			if seq != s.volSeq {
 				return // a newer value is pending
 			}
+			a.fieldChanged(s, "Volume", fmt.Sprintf("%d%%", vol))
 			if a.runner != nil {
 				a.runner.SetVolume(browser, vol)
 			}
