@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"syscall"
@@ -152,6 +153,16 @@ func logPanics() {
 func recoverGoroutine(what string) {
 	if auditLog != nil {
 		applog.Recover(auditLog, what)
+	}
+}
+
+// recoverUI is deferred in window event handlers (buttons, sliders, lists):
+// a bug there is logged with its stack trace and the action is skipped,
+// instead of closing the whole program.
+func recoverUI(what string) {
+	if r := recover(); r != nil && auditLog != nil {
+		auditLog.Log("error", applog.EventApp, fmt.Sprintf("Error in %s (program keeps running): %v", what, r),
+			"stack", string(debug.Stack()))
 	}
 }
 

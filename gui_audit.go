@@ -17,6 +17,7 @@ import (
 // s is the device tab the control belongs to (nil for global controls).
 func (a *app) on(control string, s *slotUI, f func()) func() {
 	return func() {
+		defer recoverUI(control)
 		a.action(control, s)
 		f()
 	}
@@ -68,6 +69,7 @@ func (a *app) windowState() string {
 // fieldChanged logs a setting change in a device tab (old -> new). The first
 // call for a field only records its starting value.
 func (a *app) fieldChanged(s *slotUI, field, value string, kv ...string) {
+	defer recoverUI("change log")
 	if a.vals == nil {
 		a.vals = map[string]string{}
 	}

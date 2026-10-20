@@ -51,6 +51,7 @@ func (a *app) startSoundDisplay() {
 }
 
 func (a *app) soundTick() {
+	defer recoverUI("sound display")
 	now := time.Now()
 	h := a.mw.Handle()
 	visible := win.IsWindowVisible(h) && !win.IsIconic(h)

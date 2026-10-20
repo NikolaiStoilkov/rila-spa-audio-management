@@ -77,22 +77,26 @@ func (r *Runner) Check() []string {
 	}
 	devices, _ := ListRenderDevices()
 	seen := map[string]string{}
-	for _, o := range r.enabled() {
+	for i, o := range r.cfg.Outputs {
+		if !o.Enabled || o.Browser == "" {
+			continue
+		}
+		name := tabTitle(i, o.Name) // "2. Pool": numbered, so equal names stay clear
 		if _, err := os.Stat(o.Browser); err != nil {
-			problems = append(problems, fmt.Sprintf("%s: browser not found: %s", o.Name, o.Browser))
+			problems = append(problems, fmt.Sprintf("%s: browser not found: %s", name, o.Browser))
 		}
 		if o.DeviceID == "" {
 			// optional: plays on the Windows default output
 		} else if d, ok := FindDevice(devices, o.DeviceID); !ok {
-			problems = append(problems, fmt.Sprintf("%s: device ID %q is unknown to Windows", o.Name, o.DeviceID))
+			problems = append(problems, fmt.Sprintf("%s: device ID %q is unknown to Windows", name, o.DeviceID))
 		} else if d.State != deviceActive {
-			problems = append(problems, fmt.Sprintf("%s: device %q is %s", o.Name, d.Label(), stateText(d.State)))
+			problems = append(problems, fmt.Sprintf("%s: device %q is %s", name, d.Label(), stateText(d.State)))
 		}
 		key := strings.ToLower(filepath.Clean(o.Browser))
 		if other, dup := seen[key]; dup {
-			problems = append(problems, fmt.Sprintf("%s and %s use the same browser .exe - Windows routes audio per .exe, so both will play on the same output. Use a different browser or a copy in another folder.", other, o.Name))
+			problems = append(problems, fmt.Sprintf("%s and %s use the same browser (%s) - Windows routes audio per .exe, so both will play on the same output. Use a different browser or a copy in another folder.", other, name, filepath.Base(o.Browser)))
 		}
-		seen[key] = o.Name
+		seen[key] = name
 	}
 	return problems
 }

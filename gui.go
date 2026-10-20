@@ -264,6 +264,7 @@ func (a *app) openLogViewer() {
 }
 
 func (a *app) onTabChanged() {
+	defer recoverUI("tabs")
 	if a.busy {
 		return
 	}
@@ -289,7 +290,7 @@ func (a *app) onTabChanged() {
 
 // newOutput suggests a browser that no other output uses yet.
 func (a *app) newOutput() Output {
-	o := Output{Enabled: true, Name: fmt.Sprintf("Device %d", len(a.slots)+1)}
+	o := Output{Enabled: true, Name: a.unusedName()}
 	used := map[string]bool{}
 	for _, x := range a.cfg.Outputs {
 		used[strings.ToLower(x.Browser)] = true
@@ -339,6 +340,20 @@ func (a *app) selectTab(i int) {
 	}
 	a.tabs.SetCurrentIndex(i)
 	a.busy = busy
+}
+
+// unusedName returns "Device N" with the lowest N no tab is called yet
+// (after removing a tab, len+1 could repeat an existing name).
+func (a *app) unusedName() string {
+	taken := map[string]bool{}
+	for _, s := range a.slots {
+		taken[strings.ToLower(strings.TrimSpace(s.name.Text()))] = true
+	}
+	for n := len(a.slots) + 1; ; n++ {
+		if name := fmt.Sprintf("Device %d", n); !taken[strings.ToLower(name)] {
+			return name
+		}
+	}
 }
 
 func (a *app) slotIndex(s *slotUI) int {
@@ -499,6 +514,11 @@ func (a *app) addSlot(o Output) *slotUI {
 	a.fillDetected(s, a.deviceLabels())
 
 	a.slots = append(a.slots, s)
+	if len(a.cfg.Outputs) < len(a.slots) {
+		// A tab added with "+": add it to the settings right away, so code
+		// that looks up this tab's settings (volume, audio output) finds them.
+		a.cfg.Outputs = append(a.cfg.Outputs, o)
+	}
 	a.selectBrowser(s, o.Browser)
 	a.tabs.Pages().Insert(len(a.slots)-1, page) // just before "+"
 	page.SetTitle(tabTitle(len(a.slots)-1, o.Name))
@@ -888,11 +908,13 @@ func intPtr(v int) *int { return &v }
 // volumeChanged applies the slider value to the running browser right away
 // (debounced while the slider is being dragged) and to the background runner.
 func (a *app) volumeChanged(s *slotUI) {
-	if a.busy || s.volume == nil || a.slotIndex(s) < 0 {
+	defer recoverUI("volume slider")
+	i := a.slotIndex(s)
+	if a.busy || s.volume == nil || i < 0 || i >= len(a.cfg.Outputs) {
 		return
 	}
 	vol := s.volume.Value()
-	a.cfg.Outputs[a.slotIndex(s)].Volume = intPtr(vol)
+	a.cfg.Outputs[i].Volume = intPtr(vol)
 	browser := a.selectedBrowser(s)
 	if browser == "" {
 		return
@@ -947,6 +969,7 @@ func (a *app) fillDetected(s *slotUI, labels []string) {
 // (only that field, so other unsaved edits are not saved with it) and
 // routes the running browser to it.
 func (a *app) audioOutputChosen(s *slotUI) {
+	defer recoverUI("audio output")
 	i := a.slotIndex(s)
 	if i < 0 || i >= len(a.cfg.Outputs) {
 		return
