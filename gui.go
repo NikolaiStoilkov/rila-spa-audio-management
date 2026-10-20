@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,8 @@ type slotUI struct {
 	volume   *walk.Slider
 	volBox   *walk.NumberEdit // exact value, 1% steps
 	volSeq   int              // debounce counter for the volume slider
+	volLast  int              // last applied volume
+	vol      volumeGesture    // current drag/typing, for the volume report trail
 
 	// sound indicator (gui_sound.go)
 	level     *walk.ProgressBar
@@ -449,10 +452,11 @@ func (a *app) addSlot(o Output) *slotUI {
 				Tracking:       true,
 				ToolTipsHidden: true,
 				OnValueChanged: func() {
+					defer recoverUI("volume slider")
 					if s.volBox != nil && int(s.volBox.Value()) != s.volume.Value() {
 						s.volBox.SetValue(float64(s.volume.Value()))
 					}
-					a.volumeChanged(s)
+					a.volumeChanged(s, "slider")
 				},
 			},
 			NumberEdit{
@@ -465,10 +469,11 @@ func (a *app) addSlot(o Output) *slotUI {
 				Suffix:             " %",
 				MinSize:            Size{Width: 70},
 				OnValueChanged: func() {
+					defer recoverUI("volume % box")
 					v := int(s.volBox.Value())
 					if s.volume != nil && v != s.volume.Value() {
 						s.volume.SetValue(v) // SetValue does not raise ValueChanged
-						a.volumeChanged(s)
+						a.volumeChanged(s, "% box")
 					}
 				},
 			},
@@ -509,6 +514,7 @@ func (a *app) addSlot(o Output) *slotUI {
 	s.deviceID.SetText(o.DeviceID)
 	s.browser.SetModel(a.browserLabels())
 	s.volume.SetValue(o.VolumePercent())
+	s.volLast = o.VolumePercent()
 	s.volBox.SetValue(float64(o.VolumePercent()))
 	s.desc.SetText(strings.ReplaceAll(o.Description, "\n", "\r\n"))
 	a.fillDetected(s, a.deviceLabels())
@@ -907,37 +913,109 @@ func intPtr(v int) *int { return &v }
 
 // volumeChanged applies the slider value to the running browser right away
 // (debounced while the slider is being dragged) and to the background runner.
-func (a *app) volumeChanged(s *slotUI) {
+// Every step is checked and reported (event "volume") to catch slider bugs.
+func (a *app) volumeChanged(s *slotUI, source string) {
 	defer recoverUI("volume slider")
+	if a.busy || s.volume == nil {
+		return // values set by the program, not the user
+	}
 	i := a.slotIndex(s)
-	if a.busy || s.volume == nil || i < 0 || i >= len(a.cfg.Outputs) {
+	if i < 0 || i >= len(a.cfg.Outputs) {
+		// The tab and the settings list are out of step - the bug that used to
+		// crash here. Report it with a stack trace instead.
+		a.volumeBug(s, source, fmt.Sprintf("tab index %d, %d tabs, %d devices in settings", i, len(a.slots), len(a.cfg.Outputs)))
 		return
 	}
 	vol := s.volume.Value()
-	a.cfg.Outputs[i].Volume = intPtr(vol)
-	browser := a.selectedBrowser(s)
-	if browser == "" {
+	if vol < 0 || vol > 100 {
+		a.volumeBug(s, source, fmt.Sprintf("value %d is outside 0-100", vol))
 		return
 	}
+	a.cfg.Outputs[i].Volume = intPtr(vol)
+
+	g := &s.vol
+	if !g.active {
+		*g = volumeGesture{active: true, from: s.volLast, source: source, started: time.Now()}
+		audit("info", applog.EventVolume, fmt.Sprintf("%s: volume change started (%s)", a.deviceLabel(s), source),
+			"device", a.deviceLabel(s), "from", fmt.Sprintf("%d%%", s.volLast), "source", source,
+			"browser", a.selectedBrowser(s), "window", a.windowState())
+	}
+	g.steps++
+
 	s.volSeq++
 	seq := s.volSeq
 	time.AfterFunc(300*time.Millisecond, func() {
 		a.mw.Synchronize(func() {
+			defer recoverUI("volume apply")
 			if seq != s.volSeq {
 				return // a newer value is pending
 			}
-			a.fieldChanged(s, "Volume", fmt.Sprintf("%d%%", vol))
-			if a.runner != nil {
-				a.runner.SetVolume(browser, vol)
-			}
-			name, svcl, outputs := strings.TrimSpace(s.name.Text()), a.cfg.svcl(), a.cfg.Clone().Outputs
-			safeGo("set volume", func() {
-				if n := applyVolume(svcl, volumeTargets(outputs, browser), vol); n > 0 {
-					a.logf("%s: volume %d%%", name, vol)
-				}
-			})
+			a.applyVolumeNow(s, vol)
 		})
 	})
+}
+
+type volumeGesture struct {
+	active  bool
+	from    int
+	steps   int
+	source  string
+	started time.Time
+}
+
+// applyVolumeNow ends a gesture: saves the value in the runner, sets it on
+// the browser and logs a summary of what happened.
+func (a *app) applyVolumeNow(s *slotUI, vol int) {
+	g := s.vol
+	s.vol = volumeGesture{}
+	from := s.volLast
+	s.volLast = vol
+	dev := a.deviceLabel(s)
+	browser := a.selectedBrowser(s)
+	a.fieldChanged(s, "Volume", fmt.Sprintf("%d%%", vol))
+
+	kv := []string{"device", dev, "from", fmt.Sprintf("%d%%", from), "to", fmt.Sprintf("%d%%", vol),
+		"source", g.source, "steps", fmt.Sprint(g.steps), "gesture_took", time.Since(g.started).Round(time.Millisecond).String()}
+	if browser == "" {
+		audit("warning", applog.EventVolume, dev+": volume set, but no browser is selected - nothing to apply it to", kv...)
+		return
+	}
+	if a.runner != nil {
+		a.runner.SetVolume(browser, vol)
+	}
+	pids := pidsForExe(browser)
+	if len(pids) == 0 {
+		audit("info", applog.EventVolume, fmt.Sprintf("%s: volume %d%% saved for %s, which is not open - applied when it opens", dev, vol, browserName(browser)),
+			append(kv, "browser", browser)...)
+		return
+	}
+	svcl, outputs := a.cfg.svcl(), a.cfg.Clone().Outputs
+	safeGo("set volume", func() {
+		start := time.Now()
+		targets := volumeTargets(outputs, browser)
+		ok, failed := applyVolumeDetailed(svcl, targets, vol)
+		kv := append(kv, "browser", browser, "processes", fmt.Sprint(len(pids)),
+			"svcl_targets", strings.Join(targets, " "), "svcl_ok", fmt.Sprint(ok),
+			"svcl_failed", strings.Join(failed, " | "), "apply_took", time.Since(start).Round(time.Millisecond).String())
+		switch {
+		case len(failed) > 0:
+			audit("error", applog.EventVolume, fmt.Sprintf("%s: volume %d%% could not be fully applied", dev, vol), kv...)
+		case ok == 0:
+			audit("warning", applog.EventVolume, fmt.Sprintf("%s: volume %d%% - no audio session found to apply it to", dev, vol), kv...)
+		default:
+			audit("info", applog.EventVolume, fmt.Sprintf("%s: volume %d%% -> %d%% applied", dev, from, vol), kv...)
+		}
+	})
+}
+
+// volumeBug reports an impossible slider state with a stack trace in
+// log-viewer-crash.txt, instead of crashing.
+func (a *app) volumeBug(s *slotUI, source, detail string) {
+	msg := "volume " + source + " in an invalid state: " + detail
+	audit("error", applog.EventVolume, msg, "device", a.deviceLabel(s))
+	if auditLog != nil {
+		auditLog.CrashReport(applog.KindRecovered+" (volume "+source+")", msg, string(debug.Stack()), time.Now(), nil)
+	}
 }
 
 func (a *app) withBusy(f func()) {

@@ -39,6 +39,7 @@ const (
 	EventSystem = "system" // Windows shutdown, logoff, sleep, resume
 	EventRunner = "runner" // browsers started, audio routed, volume
 	EventSound  = "sound"  // a device started / stopped playing sound
+	EventVolume = "volume" // volume slider / % box: changes, applies, problems
 	EventLogin  = "login"  // log viewer logins
 	EventViewer = "viewer" // log viewer opened / closed
 )
@@ -100,7 +101,15 @@ type Logger struct {
 	queue chan []byte
 	flush chan chan struct{}
 	lock  crossProcessLock // GUI, background run and viewer can write at once
+
+	// Version is shown in crash reports; set by the program.
+	Version string
+
+	recentMu sync.Mutex
+	recent   []Entry // last entries, for "what happened just before" in crash reports
 }
+
+const recentKeep = 25
 
 const (
 	xmlHeader  = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<log>\r\n"
@@ -172,11 +181,36 @@ func (l *Logger) Log(level, event, msg string, kv ...string) {
 			e.Data = append(e.Data, Field{Name: kv[i], Value: kv[i+1]})
 		}
 	}
+	l.remember(e)
 	data, err := xml.MarshalIndent(e, "  ", "  ")
 	if err != nil {
 		return
 	}
 	l.queue <- append(append([]byte("  "), data...), "\r\n"...)
+}
+
+func (l *Logger) remember(e Entry) {
+	l.recentMu.Lock()
+	defer l.recentMu.Unlock()
+	l.recent = append(l.recent, e)
+	if len(l.recent) > recentKeep {
+		l.recent = append([]Entry(nil), l.recent[len(l.recent)-recentKeep:]...)
+	}
+}
+
+// Recent returns the last entries logged by this program, oldest first.
+func (l *Logger) Recent() []Entry {
+	l.recentMu.Lock()
+	defer l.recentMu.Unlock()
+	return append([]Entry(nil), l.recent...)
+}
+
+// Program is the exe this logger belongs to.
+func (l *Logger) Program() string {
+	if l.mode == "viewer" {
+		return "log-viewer.exe"
+	}
+	return "spa-audio.exe"
 }
 
 // Write lets the standard log package write here (event "app").

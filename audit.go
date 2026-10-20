@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"strconv"
 	"sync"
 	"syscall"
@@ -136,33 +134,32 @@ func endSession(reason string, kv ...string) {
 	})
 }
 
-// logPanics records a crash on the main (window) thread with its stack
-// trace, then lets it crash.
+// logPanics writes a crash report (log-viewer-crash.txt) for a crash on the
+// main (window) thread, then lets the program close.
 func logPanics() {
 	if r := recover(); r != nil {
-		buf := make([]byte, 16<<10)
-		buf = buf[:runtime.Stack(buf, false)]
-		audit("error", applog.EventApp, fmt.Sprintf("Program crashed: %v", r), "stack", string(buf))
-		auditLog.Flush()
-		os.Remove(sessionPath()) // already logged as a crash
+		if auditLog != nil {
+			auditLog.Crashed(r)
+		}
+		os.Remove(sessionPath()) // reported as a crash, not "did not end normally"
 		panic(r)
 	}
 }
 
-// recoverGoroutine is deferred in background goroutines (see applog.Recover).
+// recoverGoroutine is deferred in background goroutines. recover() must be
+// called right here (in the deferred function) to work.
 func recoverGoroutine(what string) {
-	if auditLog != nil {
-		applog.Recover(auditLog, what)
+	if r := recover(); r != nil && auditLog != nil {
+		auditLog.Recovered(what, r)
 	}
 }
 
 // recoverUI is deferred in window event handlers (buttons, sliders, lists):
-// a bug there is logged with its stack trace and the action is skipped,
-// instead of closing the whole program.
+// a bug there gets a crash report and the action is skipped, instead of
+// closing the whole program.
 func recoverUI(what string) {
 	if r := recover(); r != nil && auditLog != nil {
-		auditLog.Log("error", applog.EventApp, fmt.Sprintf("Error in %s (program keeps running): %v", what, r),
-			"stack", string(debug.Stack()))
+		auditLog.Recovered(what, r)
 	}
 }
 

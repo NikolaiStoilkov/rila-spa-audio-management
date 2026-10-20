@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"rila-spa-audio/internal/applog"
@@ -110,12 +112,15 @@ type viewer struct {
 	stats       *statModel
 	path        string
 	all         []applog.Entry
+	crashText   *walk.TextEdit
+	crashInfo   *walk.Label
+	crashMod    time.Time
 	offset      int64       // bytes of the log already read
 	loading     atomic.Bool // a background read is running
 }
 
 var events = []string{"All", applog.EventApp, applog.EventAction, applog.EventChange, applog.EventSave,
-	applog.EventMouse, applog.EventWindow, applog.EventTab, applog.EventSystem, applog.EventRunner, applog.EventSound,
+	applog.EventMouse, applog.EventWindow, applog.EventTab, applog.EventSystem, applog.EventRunner, applog.EventSound, applog.EventVolume,
 	applog.EventLogin, applog.EventViewer}
 
 func exeDir() string {
@@ -130,7 +135,13 @@ func main() {
 	path := filepath.Join(exeDir(), "spa-audio-log.xml")
 	audit = applog.New(path, "viewer")
 	defer audit.Flush()
-	applog.CaptureCrashes(audit, filepath.Join(exeDir(), "log-viewer-crash.txt"))
+	applog.CaptureCrashes(audit, filepath.Join(exeDir(), "log-viewer-crash-raw.txt"))
+	defer func() {
+		if r := recover(); r != nil {
+			audit.Crashed(r)
+			panic(r)
+		}
+	}()
 	user, ok := login()
 	if !ok {
 		return
@@ -290,6 +301,29 @@ func (v *viewer) run() {
 							Label{AssignTo: &v.statStatus},
 						},
 					},
+					{
+						Title:  "Crash reports",
+						Layout: VBox{},
+						Children: []Widget{
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									Label{AssignTo: &v.crashInfo},
+									HSpacer{},
+									PushButton{Text: "Refresh", OnClicked: func() { v.crashMod = time.Time{}; v.loadCrashReports() }},
+									PushButton{Text: "Copy all", OnClicked: func() { walk.Clipboard().SetText(v.crashText.Text()) }},
+									PushButton{Text: "Show file in folder", OnClicked: v.showCrashFile},
+								},
+							},
+							TextEdit{
+								AssignTo: &v.crashText,
+								ReadOnly: true,
+								VScroll:  true,
+								HScroll:  true,
+								Font:     Font{Family: "Consolas", PointSize: 10},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -327,6 +361,7 @@ func (v *viewer) forceReload() {
 // so the window stays responsive with large logs. The first read parses the
 // file on all CPU cores.
 func (v *viewer) reload() {
+	v.loadCrashReports()
 	if v.loading.Swap(true) {
 		return
 	}
@@ -512,4 +547,46 @@ func (v *viewer) openFile() {
 		v.loading.Store(false)
 		v.forceReload()
 	}
+}
+
+func (v *viewer) crashFile() string {
+	return filepath.Join(filepath.Dir(v.path), applog.CrashReportFile)
+}
+
+// loadCrashReports shows log-viewer-crash.txt, newest report first. It is
+// re-read only when the file changed.
+func (v *viewer) loadCrashReports() {
+	if v.crashText == nil {
+		return
+	}
+	path := v.crashFile()
+	fi, err := os.Stat(path)
+	if err != nil {
+		if v.crashMod.IsZero() && v.crashText.Text() == "" {
+			v.crashInfo.SetText("No crash reports - nothing has crashed. (" + path + ")")
+		}
+		return
+	}
+	if fi.ModTime().Equal(v.crashMod) {
+		return
+	}
+	v.crashMod = fi.ModTime()
+	reports, err := applog.ReadCrashReports(path)
+	if err != nil {
+		v.crashInfo.SetText("Cannot read " + path + ": " + err.Error())
+		return
+	}
+	v.crashText.SetText(strings.Join(reports, "\r\n"))
+	v.crashInfo.SetText(fmt.Sprintf("%d report(s), newest first  -  %s", len(reports), path))
+}
+
+func (v *viewer) showCrashFile() {
+	path := v.crashFile()
+	if _, err := os.Stat(path); err != nil {
+		path = filepath.Dir(path) // no reports yet: open the folder
+	}
+	cmd := exec.Command("explorer.exe")
+	// Explorer needs exactly /select,"path" (Go's quoting would break paths with spaces).
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `explorer.exe /select,"` + path + `"`}
+	cmd.Start()
 }

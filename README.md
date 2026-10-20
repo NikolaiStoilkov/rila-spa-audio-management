@@ -53,9 +53,13 @@ It has two programs:
 - **Parallel work:** devices are routed in parallel, and log writes are batched on a background goroutine.
 - **Priority:** the program runs at *above normal* priority, so routing and the meter stay responsive while browsers use the CPU.
 - **Log viewer:** reads only the new part of the log, in the background. Large logs are parsed on all CPU cores.
-- **Crash reports:** fatal errors (including ones `recover` cannot catch) go to `spa-audio-crash.txt` / `log-viewer-crash.txt` via `debug.SetCrashOutput`.
-  They are copied into the log as an `app` error at the next start.
-  A panic in a background goroutine is logged and only stops that goroutine.
+- **Crash reports:** both programs append readable reports to **`log-viewer-crash.txt`** next to the exe ([internal/applog/crash.go](internal/applog/crash.go)).
+  The log viewer shows them in its **Crash reports** tab, newest first.
+  - Each report has the time, program and version, Windows user, the cause in plain words, the raw error, and **where** (file, line, function).
+  - It also lists the last 25 log entries (**what happened just before**) and the full stack.
+  - Crashes on the window thread are reported, then the program closes, and Windows restarts it.
+  - Errors in window handlers (buttons, slider, lists) and background goroutines are reported, and the program keeps running.
+  - Fatal errors that `recover` cannot catch go to `spa-audio-crash-raw.txt` / `log-viewer-crash-raw.txt` (`debug.SetCrashOutput`) and become a report at the next start. The older `spa-audio-crash.txt` is imported too.
 - **Tab icons:** set with `TCM_SETITEM` on two images added once. walk's `TabPage.SetImage` adds a new copy to the image list on every call, which would leak.
 
 ## Running in the background
@@ -95,6 +99,7 @@ The code is in [internal/applog](internal/applog) (shared by both programs) and 
 | `window` / `tab` | Window opened, hidden to tray, minimized/maximized/restored, focus gained/lost, device list opened/closed, tab switches. |
 | `system` | Windows shutdown/restart/logoff, sleep and resume. |
 | `runner` | Audio routing per browser process, volume, Save & Apply summaries. |
+| `volume` | Volume slider / % box: start of each change, the applied value (from → to, steps, browser processes, svcl result and timing), and invalid states. Invalid states also get a crash report. |
 | `sound` | A device started playing, or has been silent for 10 s (e.g. a radio stream dropped). |
 | `login` / `viewer` | Log viewer logins (successful or failed, with the username tried, never the password), lockout, opened/closed. |
 

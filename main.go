@@ -29,7 +29,11 @@ func main() {
 	defer auditLog.Flush()
 	log.SetFlags(0) // the XML entry carries the timestamp
 	log.SetOutput(auditLog)
-	applog.CaptureCrashes(auditLog, filepath.Join(exeDir(), "spa-audio-crash.txt"))
+	auditLog.Version = appVersion
+	// Fatal errors go to a raw file first and become a readable report in
+	// log-viewer-crash.txt at the next start (older versions used spa-audio-crash.txt).
+	applog.CaptureCrashes(auditLog, filepath.Join(exeDir(), "spa-audio-crash-raw.txt"),
+		filepath.Join(exeDir(), "spa-audio-crash.txt"))
 	defer logPanics()
 
 	// Dedicated audio PC: keep routing and the sound meter responsive even

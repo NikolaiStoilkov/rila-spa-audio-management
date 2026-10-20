@@ -221,13 +221,21 @@ func volumeTargets(outputs []Output, browser string) []string {
 // applyVolume sets the per-application volume (Windows volume mixer) and
 // returns how many svcl calls succeeded.
 func applyVolume(svcl string, targets []string, vol int) int {
-	ok := 0
-	for _, t := range targets {
-		if hiddenCommand(svcl, "/SetVolume", t, strconv.Itoa(vol)).Run() == nil {
-			ok++
-		}
-	}
+	ok, _ := applyVolumeDetailed(svcl, targets, vol)
 	return ok
+}
+
+// applyVolumeDetailed also describes each failed svcl call.
+func applyVolumeDetailed(svcl string, targets []string, vol int) (ok int, failed []string) {
+	for _, t := range targets {
+		out, err := hiddenCommand(svcl, "/SetVolume", t, strconv.Itoa(vol)).CombinedOutput()
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v %s", t, err, strings.TrimSpace(string(out))))
+			continue
+		}
+		ok++
+	}
+	return ok, failed
 }
 
 func (r *Runner) Stop() {
